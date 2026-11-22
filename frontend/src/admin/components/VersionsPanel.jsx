@@ -1,0 +1,81 @@
+import { useState } from "react";
+import { Modal } from "./ui.jsx";
+import { Icon } from "../../components/ui/icons.jsx";
+import { VERSION_LANGS, isConvertible, isRefBlock, buildCopyText, parsePaste, parseByOrder, applyPaste } from "../../lib/versions.js";
+import { adminApi } from "../../services/admin.js";
+import { alignmentIssues } from "../../lib/highlights.js";
+
+/**
+ * One card under the post: for each language, "copy" -> convert elsewhere -> "paste".
+ * The post structure (paragraph / image / paragraph ...) is built once above;
+ * pasted text drops into the matching block by its [number].
+ */
+export function VersionsPanel({ baseLang, title, titleTr, setTitleTr, blocks, setBlocks, toast }) {
+  const [paste, setPaste] = useState(null); // { lang, label, text }
+  const hasTr = (b, code) => (isRefBlock(b) ? !!b.tr?.[code]?.book || !!b.tr?.[code]?.author || !!b.tr?.[code]?.referenceText : !!b.tr?.[code]?.trim());
+  const total = blocks.filter((b) => isConvertible(b) || isRefBlock(b)).length;
+
+  async function copy(lang, label) {
+    if (!total) return toast("Pehle upar post likhein, phir copy karein", "error");
+    try {
+      // References are read fresh, so a book name edited a moment ago is what gets copied.
+      const ids = [...new Set(blocks.filter(isRefBlock).map((b) => b.referenceId))];
+      const found = (await Promise.all(ids.map((id) => adminApi.references.get(id).catch(() => null)))).filter(Boolean);
+      const refs = Object.fromEntries(found.map((r) => [r.id, r]));
+      await navigator.clipboard.writeText(buildCopyText(lang, title, blocks, baseLang || "en", refs));
+      toast(`Copy ho gaya. Ab ChatGPT mein paste karke ${label} mein convert karwayein.`);
+    } catch { toast("Copy nahi ho paya", "error"); }
+  }
+
+  function apply() {
+    let parsed = parsePaste(paste.text, blocks.length);
+    if (!Object.keys(parsed).length) parsed = parseByOrder(paste.text, blocks, !!title.trim()) || {};
+    const r = applyPaste(paste.lang, parsed, titleTr, blocks, baseLang);
+    if (!r.count) return toast("Koi [number] wala hissa nahi mila. ChatGPT ka jawab waisa hi paste karein jaisa mila.", "error");
+    setBlocks(r.blocks); setTitleTr(r.titleTr); setPaste(null);
+    toast(`${r.count} hisse apni jagah par lag gaye`);
+    // Highlights follow the same line in every version only when each version has the same number of lines/sentences.
+    const bad = alignmentIssues(r.blocks, baseLang);
+    if (bad.length) toast(`Paste ho gaya. Sirf hissa ${bad.slice(0, 8).join(", ")} mein lines/jumle ki ginti dusri zabaan se alag hai, isliye wahan highlight sirf ek zabaan mein chalega. Chahein to dobara convert karwa lein.`);
+  }
+
+  return (
+    <div className="a-card space-y-4 p-4">
+      <div>
+        <h2 className="text-base font-semibold">Doosri zabaan ke versions banayein</h2>
+        <ol className="mt-2 list-decimal space-y-1 ps-5 text-sm text-ad-mute">
+          <li>Upar poora post likh lein.</li>
+          <li>Jis zabaan ka version chahiye, uske <b>Copy</b> button par dabayein.</li>
+          <li>ChatGPT mein paste karke convert karwayein, aur uska jawab copy karein.</li>
+          <li>Yahan wapas aakar <b>Paste</b> button dabayein aur paste kar dein.</li>
+        </ol>
+      </div>
+      {VERSION_LANGS.map(([code, label]) => {
+        const mine = code === baseLang;
+        const done = blocks.filter((b) => (isConvertible(b) || isRefBlock(b)) && hasTr(b, code)).length;
+        return (
+          <div key={code} className="space-y-2 rounded-lg border border-ad-rule p-3">
+            <p className="text-sm font-semibold">{label} version {!mine && <span className="ms-1 text-xs font-normal text-ad-mute">{done}/{total} hisse bhare</span>}</p>
+            {mine ? (
+              <p className="text-sm text-green-700">✓ Aapne post isi zabaan mein likhi hai</p>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                <button type="button" className="a-btn gap-2" onClick={() => copy(code, label)}>📋 Click to Copy for Translation</button>
+                <button type="button" className="a-btn-primary gap-2" onClick={() => (total ? setPaste({ lang: code, label, text: "" }) : toast("Pehle upar post likhein, phir paste karein", "error"))}>📥 Click to Paste Translation</button>
+              </div>
+            )}
+          </div>
+        );
+      })}
+      {paste && (
+        <Modal title={`${paste.label} version paste karein`} wide onClose={() => setPaste(null)}>
+          <textarea className="a-input" rows={14} dir="auto" autoFocus placeholder="ChatGPT ka poora jawab yahan paste karein" value={paste.text} onChange={(e) => setPaste({ ...paste, text: e.target.value })} />
+          <div className="mt-3 flex justify-end gap-2">
+            <button type="button" className="a-btn" onClick={() => setPaste(null)}>Cancel</button>
+            <button type="button" className="a-btn-primary" onClick={apply}>Paste karein</button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}

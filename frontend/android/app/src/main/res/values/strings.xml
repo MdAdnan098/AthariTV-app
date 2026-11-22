@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">AthariTV</string>
+    <string name="title_activity_main">AthariTV</string>
+    <string name="package_name">com.atharitv.app</string>
+    <string name="custom_url_scheme">com.atharitv.app</string>
+</resources>

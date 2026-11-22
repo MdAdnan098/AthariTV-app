@@ -1,0 +1,227 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import { adminApi } from "../../services/admin.js";
+import { useAsync } from "../../lib/useAsync.js";
+import { isSlug, slugify } from "../../lib/format.js";
+import { newBlock, referenceIdsOf, withIds } from "../../lib/blocks.js";
+import { applyEdits, cleanBlocksHl } from "../../lib/highlights.js";
+import { setLineHeading } from "../../lib/lineHeading.js";
+import { flattenTree, folderLabel } from "../../lib/folders.js";
+import { FolderForm } from "../components/FolderForm.jsx";
+import { BlockEditor } from "../components/BlockEditor.jsx";
+import { MediaUploader } from "../components/MediaUploader.jsx";
+import { ArticleView } from "../../components/article/ArticleView.jsx";
+import { Icon } from "../../components/ui/icons.jsx";
+import { VersionsPanel } from "../components/VersionsPanel.jsx";
+import { detectLang } from "../../lib/versions.js";
+import AdminDock from "../components/AdminDock.jsx";
+import MoveBar, { useBlockSelect } from "../components/BlockMover.jsx";
+import { useNoPattern } from "../../lib/useNoPattern.js";
+import { ErrorBox, Field, Modal, Spinner, StatusBadge, useConfirm, useToast } from "../components/ui.jsx";
+
+const BLANK = { titleTr: {}, title: "", slug: "", language: "ur", categoryId: "", topicId: "", excerpt: "", seoTitle: "", seoDescription: "", coverKey: "", status: "draft" };
+const pick = (a) => ({ ...BLANK, ...Object.fromEntries(Object.keys(BLANK).map((k) => [k, a[k] ?? ""])), titleTr: a.titleTr || {} });
+
+export default function ArticleEditor() {
+  useNoPattern(); // post pages: plain page colour, no geometric pattern
+  const { id } = useParams();
+  const isNew = !id;
+  const nav = useNavigate();
+  const toast = useToast();
+  const [confirm, dialog] = useConfirm();
+  const [f, setF] = useState(BLANK);
+  const [blocks, setBlocks] = useState(() => [newBlock("text")]);
+  const sel = useBlockSelect(blocks); // Select & Move (preview): tick written blocks and move them into a Block
+  const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState(null);
+  const [addFolder, setAddFolder] = useState(false);
+  const [hlOn, setHlOn] = useState(false);
+  const [addOn, setAddOn] = useState(false);
+  const [editOn, setEditOn] = useState(false);
+  const [srcLang, setSrcLang] = useState(null); // the stored original language of a saved post (permanent)
+  const rev = useRef(null); // updatedAt of the version this editor is based on (stale-save guard)
+  // the script the admin wrote in. A saved post keeps the language it was created in (permanent); only a new post is detected.
+  const lang = (!isNew && srcLang) || detectLang(f.title, blocks);
+  const saved = useRef("");
+
+  const cats = useAsync((s) => adminApi.categories.list({ status: "active" }, s), []);
+  // Topics ("folders") of the selected category - reloads whenever the category changes.
+  const topicsRes = useAsync((s) => (f.categoryId ? adminApi.topics.list({ categoryId: f.categoryId }, s) : []), [f.categoryId]);
+  const topicOptions = flattenTree((topicsRes.data || []).filter((t) => t.status === "active" || t.id === f.topicId));
+
+  const loaded = useAsync(async (s) => {
+    if (isNew) return null;
+    const a = await adminApi.articles.get(id, s);
+    // The working copy: edits made from "View site" that are not published yet come first.
+    const work = withIds(a.pending?.blocks ?? a.blocks);
+    setF(pick(a)); setBlocks(work); setSrcLang(a.sourceLanguage || a.language);
+    saved.current = JSON.stringify([pick(a), a.pending ? [] : work]);
+    rev.current = a.updatedAt;
+    return a;
+  }, [id]);
+
+  // First run: no categories yet -> create "Aqaid" and "Masail" so the dropdown is never empty.
+  const seeded = useRef(false);
+  useEffect(() => {
+    if (!cats.data || cats.data.length || seeded.current) return;
+    seeded.current = true;
+    Promise.all([["Aqaid", "aqaid", "aqeedah"], ["Masail", "masail", "masail"]].map(([name, slug, type], ordering) => adminApi.categories.create({ name, slug, description: null, type, status: "active", ordering })))
+      .then(() => cats.reload()).catch(() => {});
+  }, [cats.data]);
+
+  // Default category for brand-new articles.
+  useEffect(() => { if (isNew && !f.categoryId && cats.data?.[0]) setF((s) => ({ ...s, categoryId: cats.data[0].id })); }, [isNew, cats.data, f.categoryId]);
+
+  const dirty = useMemo(() => (isNew ? f.title || blocks.length > 0 : JSON.stringify([f, blocks]) !== saved.current), [f, blocks, isNew]);
+  useEffect(() => {
+    const warn = (e) => dirty && (e.preventDefault(), (e.returnValue = ""));
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
+
+  const set = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.value }));
+
+  async function save() {
+    if (!f.title.trim()) return toast("Title is required", "error"), null;
+    if (!f.categoryId) return toast("Category chuniye (Aqaid ya Masail)", "error"), null;
+    // The link name is created automatically; Urdu/Hindi titles get a random one.
+    let slug = isSlug(f.slug) ? f.slug : slugify(f.slug || f.title);
+    if (!isSlug(slug)) slug = "article-" + Math.random().toString(36).slice(2, 8);
+    if (slug !== f.slug) setF((s) => ({ ...s, slug }));
+    const body = {
+      categoryId: f.categoryId, topicId: f.topicId || null, title: f.title.trim(), titleTr: Object.fromEntries(Object.entries(f.titleTr || {}).filter(([, v]) => v && v.trim())), slug, language: lang || "en", sourceLanguage: lang || "en", blocks: cleanBlocksHl(blocks, lang || "en"),
+      references: referenceIdsOf(blocks), excerpt: f.excerpt.trim() || null,
+      seoTitle: f.seoTitle.trim() || null, seoDescription: f.seoDescription.trim() || null, coverKey: f.coverKey || null,
+    };
+    setBusy(true);
+    try {
+      let a;
+      try {
+        a = isNew ? await adminApi.articles.create(body) : await adminApi.articles.update(id, { ...body, baseUpdatedAt: rev.current, overwritePending: true });
+      } catch (e) {
+        // Same link name already used by another article: add a short suffix and retry once.
+        if (!isNew || !/slug/i.test(e.message)) throw e;
+        a = await adminApi.articles.create({ ...body, slug: `${slug}-${Math.random().toString(36).slice(2, 6)}` });
+      }
+      saved.current = JSON.stringify([pick(a), withIds(a.blocks)]);
+      rev.current = a.updatedAt;
+      toast(live === "published" ? "Changes save ho gaye — post live update ho gayi" : "Saved");
+      if (isNew) nav(`/admin/articles/${a.id}`, { replace: true });
+      else { setF(pick(a)); loaded.reload(); }
+      return a;
+    } catch (e) { toast(e.message, "error"); return null; }
+    finally { setBusy(false); }
+  }
+
+  async function openPreview() {
+    setPreview({ refs: [] });
+    const refs = (await Promise.all(referenceIdsOf(blocks).map((r) => adminApi.references.get(r).catch(() => null)))).filter(Boolean);
+    setPreview({ refs });
+  }
+
+  async function transition(name) {
+    const a = dirty ? await save() : { id };
+    if (!a) return;
+    try { await adminApi.articles.action(a.id, name); toast(`Article ${name === "archive" ? "archived" : name + "ed"}`); isNew ? nav(`/admin/articles/${a.id}`, { replace: true }) : loaded.reload(); } catch (e) { toast(e.message, "error"); }
+  }
+  async function remove() {
+    if (!(await confirm({ title: "Article delete karein?", message: "Ye article hamesha ke liye delete ho jayega. Ye wapas nahi aa sakta.", confirm: "Delete", danger: true }))) return;
+    try { await adminApi.articles.remove(id); saved.current = null; toast("Article delete ho gaya"); nav("/admin/articles", { replace: true }); } catch (e) { toast(e.message, "error"); }
+  }
+
+  if (!isNew && loaded.loading && !loaded.data) return <Spinner />;
+  if (!isNew && loaded.error && !loaded.data) return <ErrorBox error={loaded.error} onRetry={loaded.reload} />;
+
+  const live = loaded.data?.status;
+  return (
+    <>
+      <div className="sticky top-0 z-30 -mx-4 mb-6 flex flex-wrap items-center justify-between gap-2 border-b border-ad-rule bg-ad-bg/95 px-4 py-3 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
+        <div className="flex items-center gap-3"><Link to="/admin/articles" className="text-sm text-ad-mute hover:text-ad-ink">← Articles</Link>{!isNew && <StatusBadge status={live} />}{dirty && <span className="text-xs text-ad-warn">Unsaved changes</span>}</div>
+        <div className="flex flex-wrap gap-2">
+          <button className="a-btn inline-flex items-center gap-1.5" onClick={openPreview} title="Ab tak jitna likha hai uska preview"><Icon name="eye" size={16} />Preview</button>
+          {live === "published"
+            ? <button className="a-btn-primary" onClick={() => save()} disabled={busy || !dirty} title="Edit kiye hue changes live post par save karein">{busy ? "Saving…" : "Save changes"}</button>
+            : <button className="a-btn" onClick={save} disabled={busy}>{busy ? "Saving…" : "Save draft"}</button>}
+          {live === "published" ? <button className="a-btn btn-cta" onClick={() => transition("unpublish")}>Unpublish</button> : <button className="a-btn-primary btn-cta" onClick={() => transition("publish")} disabled={busy}>Publish</button>}
+          {!isNew && <button className="a-btn-danger" onClick={remove}><Icon name="trash" size={15} /> Delete</button>}
+        </div>
+      </div>
+
+      <div className="grid gap-6 xl:grid-cols-[1fr_330px]">
+        <div className="min-w-0 space-y-6">
+          <input className="a-input !py-3 !text-xl !font-semibold" dir="auto" placeholder="Article title" value={f.title} onChange={(e) => setF((s) => ({ ...s, title: e.target.value, slug: isNew ? slugify(e.target.value) : s.slug }))} />
+          <BlockEditor blocks={blocks} onChange={setBlocks} baseLang={lang || "en"} />
+          <VersionsPanel baseLang={lang} title={f.title} titleTr={f.titleTr} setTitleTr={(titleTr) => setF((s) => ({ ...s, titleTr }))} blocks={blocks} setBlocks={setBlocks} toast={toast} />
+        </div>
+
+        <aside className="space-y-4 xl:sticky xl:top-20 xl:self-start">
+          <div className="a-card space-y-3 p-4">
+            <h2 className="text-sm font-semibold">Settings</h2>
+            <Field label="Category *"><select className="a-input" value={f.categoryId} onChange={(e) => setF((s) => ({ ...s, categoryId: e.target.value, topicId: "" }))}>
+              {[["aqeedah", "Aqaid"], ["masail", "Masail"]].map(([type, label]) => {
+                const items = (cats.data || []).filter((c) => c.type === type);
+                return items.length ? <optgroup key={type} label={label}>{items.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</optgroup> : null;
+              })}
+            </select></Field>
+            <Field label="Folder / Topic">
+              <select className="a-input" dir="auto" value={f.topicId || ""} onChange={(e) => setF((s) => ({ ...s, topicId: e.target.value }))} disabled={topicsRes.loading && !topicsRes.data}>
+                <option value="">— Koi topic nahi (seedha category mein) —</option>
+                {topicOptions.map((t) => <option key={t.id} value={t.id}>{folderLabel(t)}{t.status !== "active" ? " (hidden)" : ""}</option>)}
+                {f.topicId && !topicOptions.some((t) => t.id === f.topicId) && <option value={f.topicId}>(current topic)</option>}
+              </select>
+              <button type="button" className="a-btn mt-2 !py-1" onClick={() => setAddFolder(true)} disabled={!cats.data?.length}><Icon name="plus" size={14} />Add Folder</button>
+              {topicsRes.error ? <span className="mt-1 block text-xs text-ad-danger">Topics load nahi hue. Page refresh karke dekhein.</span>
+                : topicsRes.data && topicOptions.length === 0 ? null
+                : <span className="mt-1 block text-xs text-ad-mute">Article publish hone par is topic ke andar dikhega. Latest Posts mein har published article aata hai.</span>}
+            </Field>
+          </div>
+          <div className="a-card space-y-3 p-4">
+            <h2 className="text-sm font-semibold">Cover image</h2>
+            <div><MediaUploader value={f.coverKey} onChange={(coverKey) => setF((s) => ({ ...s, coverKey }))} label="Upload cover" /></div>
+          </div>
+        </aside>
+      </div>
+      {dialog}
+      {addFolder && (
+        <Modal wide title="New folder" onClose={() => setAddFolder(false)}>
+          <FolderForm
+            categories={cats.data || []}
+            defaultCategoryId={f.categoryId}
+            onCancel={() => setAddFolder(false)}
+            onDone={(created) => {
+              setAddFolder(false);
+              topicsRes.reload();
+              if (created.categoryId === f.categoryId) setF((s) => ({ ...s, topicId: created.id })); // article form data is untouched; only the folder is picked
+              else toast("Folder bana diya, par ye dusri category ka hai — article ki category nahi badli.");
+            }}
+          />
+        </Modal>
+      )}
+      {preview && createPortal(
+        <div className="fixed inset-0 z-[70] overflow-y-auto bg-paper font-sans text-ink">
+          <div className="sticky top-0 z-10 flex items-center justify-between border-b border-rule bg-card/95 px-4 py-2.5 backdrop-blur">
+            <span className="text-sm font-medium">Preview — abhi tak ka likha hua (save nahi hua)</span>
+            <div className="flex items-center gap-2">
+              <button className="rounded-lg border border-red-300 px-3 py-1 text-sm font-semibold text-red-600 hover:bg-red-50" onClick={() => setPreview(null)}>✕ Band karein</button>
+            </div>
+          </div>
+          <ArticleView showFontControls={false} article={{ ...f, language: lang || "en", title: f.title.trim() || "(Title abhi nahi likha)", blocks, excerpt: f.excerpt.trim() || null, coverKey: f.coverKey || null, createdAt: new Date().toISOString() }} references={preview.refs}
+            select={sel.on ? sel : undefined}
+            inline={addOn ? { onInsert: async (index, block) => { setBlocks((bs) => [...bs.slice(0, index + 1), block, ...bs.slice(index + 1)]); if (block.type === "reference" && block.referenceId) { const r = await adminApi.references.get(block.referenceId).catch(() => null); if (r) setPreview((p) => ({ ...p, refs: [...p.refs.filter((x) => x.id !== r.id), r] })); } } } : undefined}
+            edit={editOn ? { saveLabel: "Apply", onSave: async (index, nb) => { setBlocks((bs) => bs.map((b, j) => (j === index ? { ...nb, id: b.id } : b))); if (nb.type === "reference" && nb.referenceId) { const r = await adminApi.references.get(nb.referenceId).catch(() => null); if (r) setPreview((p) => ({ ...p, refs: [...p.refs.filter((x) => x.id !== r.id), r] })); } } } : undefined}
+            editor={hlOn ? { enabled: true, onApply: async (edits) => setBlocks((bs) => applyEdits(bs, edits)), onTransform: async (pieces, level) => { const res = setLineHeading(blocks, lang || "en", pieces, level); if (!res.error) setBlocks(res.blocks); return res.error; }, onAlign: async (blockId, align) => setBlocks((bs) => bs.map((b) => (b.id === blockId ? { ...b, align } : b))) } : undefined} />
+          <AdminDock zClass="z-[80]">
+            <button type="button" aria-pressed={hlOn} onClick={() => setHlOn((v) => !v)} className="text-start font-semibold">Admin · Highlight mode: {hlOn ? "ON" : "OFF"}</button>
+            <button type="button" aria-pressed={addOn} onClick={() => setAddOn((v) => !v)} className="text-start font-semibold">Admin · Add buttons: {addOn ? "ON" : "OFF"}</button>
+            <button type="button" aria-pressed={editOn} onClick={() => setEditOn((v) => !v)} className="text-start font-semibold">Admin · Edit buttons: {editOn ? "ON" : "OFF"}</button>
+            <button type="button" aria-pressed={sel.on} onClick={() => sel.setOn(!sel.on)} className="text-start font-semibold">Admin · Select &amp; Move to Block: {sel.on ? "ON" : "OFF"}</button>
+            {editOn && <span className="text-mute">Edit ke baad "Apply" dabayein, phir editor mein Save karein.</span>}
+          </AdminDock>
+          <MoveBar sel={sel} blocks={blocks} apply={async (mutate) => { setBlocks(mutate(withIds(blocks))); }} />
+        </div>,
+        document.body
+      )}
+    </>
+  );
+}

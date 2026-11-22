@@ -1,0 +1,308 @@
+import { Fragment, lazy, Suspense, useState } from "react";
+import { useI18n } from "../../i18n/index.jsx";
+import { mediaUrl } from "../../lib/media.js";
+import { isRtl, scriptOf, splitScriptRuns } from "../../lib/script.js";
+import { pickRef, pickVersion } from "../../lib/versions.js";
+import { Text, cleanText } from "../ui/Text.jsx";
+import { TEXT_COLORS, layersOf, markClass, segmentsOf, shownLang, sliceLayers, splitParagraphs } from "../../lib/highlights.js";
+import { Icon } from "../ui/icons.jsx";
+import { ReferenceCard } from "./ReferenceCard.jsx";
+import { ScanViewer } from "./ScanViewer.jsx";
+import { YouTubeBlock } from "./YouTubeBlock.jsx";
+import { Divider } from "./Divider.jsx";
+import { spanOf, blockNumbers } from "../../lib/groups.js";
+import { BLOCK_META } from "../../lib/blocks.js";
+
+// Admin-only inline "add block" control: loaded on demand, so public visitors never download it.
+const InlineAdd = lazy(() => import("../../admin/components/InlineAdd.jsx"));
+// Admin-only inline "edit block" form (pencil under every block): also loaded on demand.
+const InlineEdit = lazy(() => import("../../admin/components/InlineEdit.jsx"));
+// Admin-only Edit / Up / Down / Delete buttons under every block: also loaded on demand.
+const BlockTools = lazy(() => import("../../admin/components/BlockTools.jsx"));
+
+const AR = "\\u0600-\\u06FF\\u0750-\\u077F\\u08A0-\\u08FF\\uFB50-\\uFDFF\\uFE70-\\uFEFF";
+const RTL_RUN = new RegExp(`[${AR}]+(?:[\\s\\u200c\\u200d.,:;!?()'"\\u201C\\u201D\\u00AB\\u00BB\\-\\u2013\\u2014]+[${AR}]+)*`, "g");
+const HAS_AR = new RegExp(`[${AR}]`);
+const TR_LABEL = /^\s*(?:ترجمہ|ترجمه|ترجمة|tarjum[ae]h?|tarjama|translation|अनुवाद|तर्जुमा|तर्जमा|हवाला|حوالہ|hawala)\s*[:：\-–—]*\s*$/iu;
+const URDU_ONLY = /[\u0679\u0688\u0691\u06BA\u06BE\u06C1\u06C3\u06D2\u06D3\u06CC\u06A9\u06AF\u0686\u067E\u0698]/;
+
+/**
+ * Arabic / Urdu words inside a left-to-right line (Roman or Hindi) are wrapped as their own right-to-left run
+ * with the proper Arabic font, so they neither flip the surrounding words nor get odd spacing.
+ * Same characters in, same characters out - highlight offsets are unaffected.
+ */
+function isolateRtl(str) {
+  if (typeof str !== "string" || !HAS_AR.test(str)) return str;
+  const out = [];
+  let last = 0, m, n = 0;
+  RTL_RUN.lastIndex = 0;
+  while ((m = RTL_RUN.exec(str))) {
+    if (m.index > last) out.push(str.slice(last, m.index));
+    out.push(<span key={n++} dir="rtl" className={URDU_ONLY.test(m[0]) ? "inl-ur" : "inl-ar"}>{m[0]}</span>);
+    last = m.index + m[0].length;
+  }
+  if (last < str.length) out.push(str.slice(last));
+  return out;
+}
+
+/** Text with its saved marks as <mark> (background colours) and <span class="ar-red"> (red Arabic) elements
+ *  (plain string when there are none). Offsets are relative to `text`.
+ *  `host` is the script of the line it sits in; inside a left-to-right host, Arabic runs are isolated (see isolateRtl). */
+function marked(text, layers, host) {
+  const iso = host && !isRtl(host) ? isolateRtl : (x) => x;
+  if (!layers?.length) return iso(text);
+  return segmentsOf(text, layers).map((p, i) => {
+    let node = iso(p.text);
+    if (p.ar) node = <span className="ar-red">{node}</span>;
+    if (p.tc) node = <span className={TEXT_COLORS.find((c) => c.field === p.tc)?.cls}>{node}</span>;
+    if (p.bold) node = <strong className="fmt-bold">{node}</strong>;
+    if (p.field) node = <mark className={markClass(p.field)}>{node}</mark>;
+    // Size (percent of the surrounding text) is the OUTERMOST wrapper, so a highlight's background grows with its text.
+    if (p.size) return <span key={i} style={{ fontSize: `${p.size}%` }}>{node}</span>;
+    return <Fragment key={i}>{node}</Fragment>;
+  });
+}
+
+/** Only in highlight-editing mode: lets the admin toolbar map a selection back to (block, version, offset). */
+const hlAttrs = (on, b, lang, start = 0) => (on && b.id ? { "data-hl-block": b.id, "data-hl-lang": lang, "data-hl-start": start } : {});
+
+function Quote({ b, text, layers, attrs }) {
+  const { t } = useI18n();
+  const sacred = b.kind === "ayat" || b.kind === "hadith";
+  const s = scriptOf(b.text);
+  const big = sacred && (s === "arabic" || s === "urdu");
+  // Slight slant only where italics look right (Latin / Roman text); Arabic & Urdu scripts stay upright.
+  const slant = s === "latin" ? "italic" : "not-italic";
+  const mark = "pointer-events-none absolute select-none font-display text-[4.2rem] font-bold leading-none text-accent/25 sm:text-[6rem]";
+  return (
+    <figure className="card-lift relative my-7 overflow-hidden rounded-2xl border border-rule bg-card px-6 pb-10 pt-11 sm:px-12 sm:pb-14 sm:pt-16">
+      <span aria-hidden="true" className={`${mark} left-4 top-1 sm:left-6`}>&ldquo;</span>
+      <span aria-hidden="true" className={`${mark} bottom-[-1.9rem] right-4 sm:bottom-[-3.2rem] sm:right-6`}>&rdquo;</span>
+      {sacred && <p className="eyebrow relative mb-3">{b.kind === "ayat" ? t.article.ayat : t.article.hadith}</p>}
+      <Text as="blockquote" src={text} force={big ? s : undefined} {...attrs} className={`relative ${big ? (s === "urdu" ? "sacred-urdu text-[1.2em] sm:text-[1.4em]" : "sacred-arabic text-[1.3em] sm:text-[1.75em]") : `font-display text-[0.95em] sm:text-[1.05em] leading-[1.8] ${slant}`}`}>{marked(cleanText(text), layers, s)}</Text>
+      {b.source && <Text as="figcaption" className="relative mt-3 text-xs text-bronze sm:text-sm">— {b.source}</Text>}
+    </figure>
+  );
+}
+
+function Figure({ pages, caption, rtl }) {
+  const { t } = useI18n();
+  const [open, setOpen] = useState(null);
+  const many = pages.length > 1;
+  const note = many ? caption : pages[0].caption || caption;
+  // Scans / book pages sit in ONE light grey card: the whole page is shown (object-contain, never cropped), centred, up to 36rem wide (42rem on laptops).
+  // Several pages become a row of equal thumbnails (from the RIGHT in Urdu / Arabic). The file itself is untouched,
+  // so tap -> fullscreen viewer shows it in full quality.
+  return (
+    <figure className="my-7">
+      <div className={`${many ? "w-full" : "mx-auto w-full max-w-[36rem] min-[900px]:max-w-[42rem]"} `}>
+        {many ? (
+          <div dir={rtl ? "rtl" : "ltr"} className="flex flex-wrap items-start justify-start gap-3">
+            {pages.map((p, i) => (
+              <button key={i} dir="ltr" onClick={() => setOpen(i)} className="group relative aspect-[3/4] w-28 overflow-hidden rounded-lg border border-rule bg-paper transition hover:border-accent/60 sm:w-36 min-[900px]:w-40" aria-label={p.caption || t.article.openScan} title={t.article.openScan}>
+                <img src={p.src} alt={p.alt || p.caption || ""} loading="lazy" decoding="async" className="block h-full w-full object-contain" />
+                <span className="absolute bottom-1.5 end-1.5 rounded-full bg-black/60 px-2 py-0.5 text-[11px] font-medium tabular-nums text-white">{i + 1}/{pages.length}</span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <button dir="ltr" onClick={() => setOpen(0)} className="group block w-full" aria-label={pages[0].caption || t.article.openScan} title={t.article.openScan}>
+            <img src={pages[0].src} alt={pages[0].alt || pages[0].caption || ""} loading="lazy" decoding="async" className="mx-auto block h-auto max-h-[30rem] w-auto max-w-full rounded-md border border-rule bg-paper object-contain sm:max-h-[34rem] min-[900px]:max-h-[40rem]" />
+          </button>
+        )}
+        {note && (
+          <div dir={rtl ? "rtl" : "ltr"} className="mt-2 text-xs text-mute">
+            <Text as="span" className="min-w-0 break-words">{note}</Text>
+          </div>
+        )}
+      </div>
+      {open !== null && <ScanViewer pages={pages} start={open} onClose={() => setOpen(null)} />}
+    </figure>
+  );
+}
+
+/** Admin-only (Select & Move): the tick box above a block. */
+function SelectRow({ n, id, type, checked, onChange }) {
+  return (
+    <label dir="ltr" data-bid={id} className="flex w-fit cursor-pointer items-center gap-2 py-1 font-sans text-xs font-semibold text-mute">
+      <input type="checkbox" checked={checked} onChange={onChange} className="h-5 w-5 cursor-pointer accent-accent" />
+      <span>{BLOCK_META[type]?.label || type} <span className="opacity-60">#{n}</span></span>
+    </label>
+  );
+}
+
+/** Admin-only label of a Block (same "Label #n" style as the dashboard list); readers never see it. */
+function GroupHeader({ n, onDelete }) {
+  return (
+    <div dir="ltr" className="flex items-center gap-2 pt-2 font-sans text-xs font-semibold text-mute">
+      <span className="rounded-full bg-accent/10 px-2.5 py-0.5 text-accent">Block <span className="opacity-60">#{n}</span></span>
+      <span className="h-px flex-1 border-t border-dashed border-accent/30" aria-hidden="true" />
+      {onDelete && (
+        <button type="button" onClick={onDelete} title="Sirf ye Block hatayein (andar ka content rahega)" aria-label={`Block ${n} hatayein`} className="inline-flex items-center gap-1 rounded-full border border-rule bg-card/70 px-2 py-0.5 text-[11px] font-semibold text-mute transition hover:border-ad-danger/50 hover:text-ad-danger">
+          <Icon name="trash" size={12} />Block hatao
+        </button>
+      )}
+    </div>
+  );
+}
+
+function Pdf({ b }) {
+  const { t } = useI18n();
+  const [preview, setPreview] = useState(false);
+  const url = mediaUrl(b.key);
+  if (!url) return null;
+  return (
+    <div className="card-lift my-7 rounded-2xl border border-rule bg-card p-4 sm:p-5">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+          <span className="grid h-11 w-11 shrink-0 place-items-center rounded-lg bg-rule/50 text-bronze"><Icon name="file" size={22} /></span>
+          <div className="min-w-0 flex-1">
+            <p className="eyebrow">{t.article.pdf}</p>
+            <Text as="p" className="mt-0.5 break-words text-[0.95rem] font-medium leading-snug sm:text-base">{b.title || "PDF"}</Text>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-2.5 sm:flex sm:shrink-0">
+          <button onClick={() => setPreview((p) => !p)} className="btn-outline whitespace-nowrap !px-3 !py-2 text-sm sm:!px-4">{t.article.preview}</button>
+          <a href={url} target="_blank" rel="noopener noreferrer" className="btn-primary whitespace-nowrap !px-3 !py-2 text-sm sm:!px-4"><Icon name="external" size={15} />{t.article.openPdf}</a>
+        </div>
+      </div>
+      {preview && <iframe src={url} title={b.title || "PDF"} className="mt-4 h-[70vh] w-full rounded-lg border border-rule" />}
+    </div>
+  );
+}
+
+export function BlockRenderer({ blocks = [], references = [], baseLang = "ur", hlEdit = false, inline, edit, select }) {
+  const sel = select?.on ? select : null; // admin Select & Move: tick boxes instead of the Add / Edit buttons
+  const { contentLang } = useI18n();
+  const [editingKey, setEditingKey] = useState(null); // the block whose inline editor is open (admin only)
+  const txt = (b) => (b.kind === "ayat" || b.kind === "hadith" ? b.text : pickVersion(b.text, b.tr, baseLang, contentLang));
+  const refMap = Object.fromEntries(references.map((r) => [r.id, r]));
+  // Blocks (groups) are stored flat: a marker + the blocks after it carrying gid = marker id (lib/groups.js). Admin-only look; readers see no change.
+  const blockNo = blockNumbers(blocks); // Block #1, #2, #3 ... by order in the post (not by flat position)
+  const groupIds = new Set(blocks.filter((x) => x.type === "group" && x.id).map((x) => x.id));
+  const groupOf = (x) => (x.type === "group" ? x.id : x.gid && groupIds.has(x.gid) ? x.gid : null);
+  // "+ Add" under block `b` (position i). Inside a Block, new items join that Block; a new Block goes after the whole current Block.
+  const insertAt = (b, i) => (block, prevId, k = 0) => {
+    const gid = groupOf(b);
+    if (!gid) return inline.onInsert(i + k, block, prevId || b.id || null);
+    if (block.type === "group") {
+      const sp = spanOf(blocks, gid);
+      const end = sp ? sp[1] - 1 : i;
+      return inline.onInsert(end + k, block, prevId || blocks[end]?.id || null);
+    }
+    return inline.onInsert(i + k, block.gid ? block : { ...block, gid }, prevId || b.id || null);
+  };
+  // Hindi / Roman view: an Arabic run is right-to-left inside left-to-right text. A SHORT Arabic line shrinks to its own width
+  // and so sits at the left edge, in line with the Roman / Hindi text (the letters still run right-to-left). A long one
+  // fills the full width exactly as before. The translation that follows is pulled close. Urdu / Arabic views stay as they are.
+  const runsOf = (b) => splitParagraphs(cleanText(txt(b))).flatMap((seg) => splitScriptRuns(seg.text, seg.start));
+  // The language the reader actually sees: the picked one when the article has it, else the original. Urdu / Arabic reads right-to-left.
+  const pageLang = contentLang === baseLang || blocks.some((x) => typeof x.tr?.[contentLang] === "string" && x.tr[contentLang].trim()) ? contentLang : baseLang;
+  const rtlView = pageLang === "ur" || pageLang === "ar";
+  const ltrView = (b) => { const l = shownLang(b, baseLang, contentLang); return l !== "ur" && l !== "ar"; };
+  // A text block that is only Arabic: shown in a light bordered card (all views), so it reads as its own block.
+  const arabicOnly = (b) => { if (b?.type !== "text") return false; const r = runsOf(b); return r.length > 0 && r.every((x) => x.script === "arabic"); };
+  // A block that is only a small label ("Tarjuma:" / "ترجمہ" / "अनुवाद"): small muted label sitting close to the text under it.
+  const labelOnly = (b) => b?.type === "text" && TR_LABEL.test(cleanText(txt(b)));
+  function renderBlock(b, i) {
+        const key = b.id || i;
+        const lang = shownLang(b, baseLang, contentLang); // which script version is on screen = which highlight set applies
+        const layers = layersOf(b, lang);
+        switch (b.type) {
+          case "heading": {
+            const text = cleanText(txt(b));
+            const attrs = hlAttrs(hlEdit, b, lang);
+            const host = scriptOf(text);
+            if (b.level === 1) return <Text key={key} as="h2" src={text} {...attrs} className="mb-5 mt-12 font-display text-[1.75em] sm:text-[2.1em] font-bold leading-tight">{marked(text, layers, host)}</Text>;
+            return b.level === 3
+              ? <Text key={key} as="h3" src={text} {...attrs} className="mb-3 mt-10 font-display text-[1.25em] sm:text-[1.38em] font-semibold">{marked(text, layers, host)}</Text>
+              : <Text key={key} as="h2" src={text} {...attrs} className="mb-4 mt-12 border-t border-rule pt-8 font-display text-[1.45em] sm:text-[1.65em] font-semibold">{marked(text, layers, host)}</Text>;
+          }
+          case "text": {
+            const toLeft = ltrView(b);
+            if (labelOnly(b)) {
+              const text = cleanText(txt(b));
+              return <Text key={key} as="p" src={text} {...hlAttrs(hlEdit, b, lang)} className="ref-t ref-label mb-0 mt-6 text-[0.72em] font-semibold text-mute">{marked(text, layers, scriptOf(text))}</Text>;
+            }
+            const card = arabicOnly(b);
+            const follows = arabicOnly(blocks[i - 1]) || labelOnly(blocks[i - 1]);
+            const wrap = card
+              ? "arabic-card mb-2 mt-6"
+              : follows ? "mb-5 mt-2" : "my-5";
+            return (
+              <div key={key} dir={toLeft ? "ltr" : undefined} className={wrap}>
+                {runsOf(b).map((run, j) => {
+                  // Arabic / Urdu lines are joined with a space (1 character -> 1 character, so highlight offsets stay valid):
+                  // the text then fills the full width line after line and is justified, instead of stopping at each pasted line break.
+                  const flow = isRtl(run.script) ? run.text.replace(/\n/g, " ") : run.text;
+                  return (
+                    // Each run of same-script lines is its own paragraph with its own direction (offsets stay relative to the whole block).
+                    <Text key={j} as="p" src={flow} force={run.script} {...hlAttrs(hlEdit, b, lang, run.start)} className={`whitespace-pre-line ${toLeft && run.script === "arabic" ? "w-fit max-w-full" : ""}`}>
+                      {marked(flow, sliceLayers(layers, run.start, run.start + flow.length), run.script)}
+                    </Text>
+                  );
+                })}
+              </div>
+            );
+          }
+          case "quote":
+            return <Quote key={key} b={b} text={txt(b)} layers={layers} attrs={hlAttrs(hlEdit, b, lang)} />;
+          case "reference":
+            return refMap[b.referenceId] ? <ReferenceCard key={key} reference={pickRef(refMap[b.referenceId], b.tr, baseLang, contentLang)} /> : null;
+          case "image":
+            return b.key ? <Figure key={key} pages={[{ src: mediaUrl(b.key), alt: b.alt, caption: b.caption }]} caption={b.caption} rtl={rtlView} /> : null;
+          case "scan": {
+            const pages = (b.pages || []).filter((p) => p.key).map((p) => ({ src: mediaUrl(p.key), caption: p.caption }));
+            return pages.length ? <Figure key={key} pages={pages} caption={b.caption} rtl={rtlView} /> : null;
+          }
+          case "pdf":
+            return <Pdf key={key} b={b} />;
+          case "video":
+            return b.videoId ? <YouTubeBlock key={key} videoId={b.videoId} caption={b.caption} /> : null;
+          case "group":
+            return inline || edit || sel ? <GroupHeader n={blockNo.get(b.id) || 1} onDelete={sel && b.id ? () => sel.askDelete(b.id) : undefined} /> : null;
+          case "divider":
+            return (
+              <Divider key={key} />
+            );
+          default:
+            return null;
+        }
+  }
+
+  return (
+    <div className="reading">
+      {inline && blocks.length === 0 && <Suspense fallback={null}><InlineAdd backupKey={inline.scope ? `fs_add:${inline.scope}:start` : undefined} onInsert={(block, prevId, k = 0) => inline.onInsert(-1 + k, block, prevId || null)} /></Suspense>}
+      {blocks.map((b, i) => {
+        const key = b.id || i;
+        const editing = !!edit && editingKey === key;
+        // Reference blocks keep their converted fields per reader language, other blocks per shown script version.
+        const editLang = b.type === "reference" ? contentLang : shownLang(b, baseLang, contentLang);
+        const member = !!(inline || edit || sel) && b.type !== "group" && !!b.gid && groupIds.has(b.gid);
+        const wrap = (kids) => (member ? <div key={key} className="border-s-2 border-accent/30 ps-3">{kids}</div> : <Fragment key={key}>{kids}</Fragment>);
+        return wrap(
+        <>
+          {sel && b.type !== "group" && b.id && <SelectRow n={i + 1} id={b.id} type={b.type} checked={sel.ids.has(b.id)} onChange={() => sel.toggle(b.id)} />}
+          {editing
+            ? <Suspense fallback={null}><InlineEdit block={b} baseLang={baseLang} lang={editLang} onCancel={() => setEditingKey(null)} saveLabel={edit.saveLabel} onSave={async (nb) => { await edit.onSave(i, nb); setEditingKey(null); }} /></Suspense>
+            : sel ? <div className={`[&>*]:!my-2 ${b.id && sel.ids.has(b.id) ? "rounded-lg bg-accent/10 ring-1 ring-accent/40" : ""}`}>{renderBlock(b, i)}</div>
+            : (inline || edit) ? <div className="[&>*]:!my-2">{renderBlock(b, i)}</div> : renderBlock(b, i)}
+          {(() => {
+            const tools = edit && !editing && !sel ? (
+              <BlockTools
+                embedded={!!inline}
+                index={i} count={blocks.length} block={b}
+                onEdit={b.type !== "divider" && b.type !== "group" ? () => setEditingKey(key) : null}
+                onMove={edit.onMove ? (dir) => edit.onMove(i, dir, b.id || null) : null}
+                onRemove={edit.onRemove ? () => edit.onRemove(i, b.id || null) : null}
+              />
+            ) : null;
+            if (inline && !sel) return <Suspense fallback={null}><InlineAdd backupKey={inline.scope ? `fs_add:${inline.scope}:${key}` : undefined} onInsert={insertAt(b, i)} tools={tools} /></Suspense>;
+            return tools ? <Suspense fallback={null}>{tools}</Suspense> : null;
+          })()}
+        </>
+        );
+      })}
+    </div>
+  );
+}

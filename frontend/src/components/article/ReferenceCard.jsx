@@ -1,0 +1,73 @@
+import { useState } from "react";
+import { useI18n } from "../../i18n/index.jsx";
+import { mediaUrl, isPdfKey } from "../../lib/media.js";
+import { Text } from "../ui/Text.jsx";
+import { Icon } from "../ui/icons.jsx";
+import { isRtl, scriptOf } from "../../lib/script.js";
+import { ScanViewer } from "./ScanViewer.jsx";
+
+// Old content may already carry the "Hawala" label / 📖 / ":-" / [ ] brackets: strip them so they are never shown twice.
+const LABEL_RE = /^\s*(?:📖\s*)?(?:hawala|hawale|حوالہ|حوالے|हवाला|हवाले)(?![\p{L}\p{M}])\s*(?:📖)?\s*[:：\-–—]*\s*/iu;
+const BRACKET_RE = /^[\[［【]\s*([\s\S]*?)\s*[\]］】]$/;
+
+// The UI dictionary is always Roman, so the label follows the reader's selected language instead.
+const LABELS = { en: "Hawala", ur: "حوالہ", hi: "हवाला" };
+
+/** Plain reference text -> "[ text ]" (one bracketed line per source line), with any existing label/brackets removed first. */
+function toBracketed(text) {
+  const body = String(text ?? "").replace(LABEL_RE, "");
+  return body
+    .split("\n")
+    .map((l) => {
+      let x = l.trim(), m;
+      while ((m = x.match(BRACKET_RE))) x = m[1].trim();
+      return x;
+    })
+    .filter(Boolean)
+    .map((x) => `[ ${x} ]`)
+    .join("\n");
+}
+
+/** Scholarly citation. New references are a single free-text field; older ones (Book / Author / Volume / Page) still render as before. */
+export function ReferenceCard({ reference: r }) {
+  const { t, contentLang } = useI18n();
+  const [open, setOpen] = useState(false);
+  const scan = mediaUrl(r.mediaKey);
+  // One compact line, like a citation: Book · Author · Jild · Safha
+  const oldLine = [r.book, r.author, r.volume && `${t.article.volume} ${r.volume}`, r.page && `${t.article.page} ${r.page}`].filter(Boolean).join(" · ");
+  // Single-field reference: its text goes in the highlighted box; an old-style reference keeps its citation line + text below.
+  const line = toBracketed(oldLine || r.referenceText || "");
+  const dir = isRtl(scriptOf(line)) ? "rtl" : "ltr";
+  const below = oldLine ? r.referenceText : "";
+
+  return (
+    <aside className="my-6">
+      {/* Hawala: a light grey box, small muted label on top, the citation in smaller type. Colours live in index.css (.ref-line):
+          blue in Light, soft blue in Dark. */}
+      {(line || below) && (
+        <div>
+          {line && (
+            <>
+              <Text as="p" dir={dir} className="ref-t ref-label mb-1 text-[0.7em] font-semibold text-mute">{LABELS[contentLang] || LABELS.en}</Text>
+              <div className="ref-line">
+                <Text as="p" className="ref-t whitespace-pre-line text-[0.82em] font-semibold leading-snug">{line}</Text>
+              </div>
+            </>
+          )}
+          {below && <Text as="p" className="ref-t mt-3 text-[0.82em] leading-relaxed">{below}</Text>}
+        </div>
+      )}
+
+      {scan && (
+        isPdfKey(r.mediaKey) ? (
+          <a href={scan} target="_blank" rel="noopener noreferrer" className="btn-outline mt-4"><Icon name="file" size={16} />{t.article.openPdf}</a>
+        ) : (
+          <button onClick={() => setOpen(true)} className="group mx-auto mt-4 block w-full max-w-[36rem] overflow-hidden text-start transition hover:border-accent/60" aria-label={t.article.openScan}>
+            <img src={scan} alt={t.article.scan} loading="lazy" decoding="async" className="mx-auto block h-auto w-auto max-h-72 max-w-full rounded-md border border-rule bg-paper object-contain sm:max-h-[22rem]" />
+          </button>
+        )
+      )}
+      {open && <ScanViewer pages={[{ src: scan, caption: [r.book, r.page && `${t.article.page} ${r.page}`].filter(Boolean).join(" · ") || undefined }]} onClose={() => setOpen(false)} />}
+    </aside>
+  );
+}

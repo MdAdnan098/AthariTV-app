@@ -1,0 +1,144 @@
+import { Link } from "react-router-dom";
+import { publicApi } from "../../services/public.js";
+import { useAsync } from "../../lib/useAsync.js";
+import { mediaUrl } from "../../lib/media.js";
+import { formatDate, formatPrice } from "../../lib/format.js";
+import { Icon } from "../ui/icons.jsx";
+import { CardSkeletons, EmptyState, ErrorState, SectionHeading } from "../ui/feedback.jsx";
+import { useCourseListClock } from "../../lib/useServerClock.js";
+import { formatIstFull } from "../../lib/ist.js";
+
+export const COURSE_STATUS = {
+  enrollment_open: { label: "Enrollment Open", cls: "open-badge bg-green-600 text-white", cta: "Enroll Now" },
+  coming_soon: { label: "Coming Soon", cls: "bg-card text-accent border border-accent/30", cta: "View Details" },
+  enrollment_closed: { label: "Enrollment Closed", cls: "bg-card text-mute border border-rule", cta: "View Details" },
+  completed: { label: "Completed", cls: "bg-card text-mute border border-rule", cta: "View Details" },
+};
+
+// Class-lifecycle badges (from the server's lifecycle snapshot). While classes are running or finished they take
+// the place of the enrollment badge; before the first class the enrollment badge stays.
+const PHASE_BADGE = {
+  live_now: "bg-red-600 text-white",
+  day_completed: "bg-card text-accent border border-accent/30",
+  all_completed: "bg-card text-mute border border-rule",
+};
+
+export function CourseStatusBadge({ status, lifecycle, className = "" }) {
+  const phase = lifecycle && PHASE_BADGE[lifecycle.badge] ? lifecycle : null;
+  const s = phase ? { label: phase.label, cls: PHASE_BADGE[phase.badge] } : COURSE_STATUS[status] || COURSE_STATUS.coming_soon;
+  const dot = phase ? phase.badge === "live_now" : status === "enrollment_open";
+  return (
+    <span className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-bold ${s.cls} ${className}`}>
+      {dot && <span className="live-dot h-2 w-2 rounded-full bg-white" aria-hidden="true" />}
+      {s.label}
+    </span>
+  );
+}
+
+export function CourseCard({ course }) {
+  const thumb = mediaUrl(course.thumbnailKey);
+  const s = COURSE_STATUS[course.status] || COURSE_STATUS.coming_soon;
+  return (
+    <Link to={`/courses/${course.slug}`} className="card-lift group flex h-full flex-col rounded-2xl border border-rule bg-card p-3">
+      <div className="relative aspect-[16/9] w-full overflow-hidden rounded-xl bg-tint">
+        {thumb ? (
+          <img src={thumb} alt="" loading="lazy" decoding="async" className="h-full w-full object-cover transition-transform duration-500 ease-out group-hover:scale-[1.04]" />
+        ) : (
+          <div className="grid h-full w-full place-items-center text-accent/50"><Icon name="cap" size={44} /></div>
+        )}
+      </div>
+
+      <div className="flex flex-1 flex-col px-2 pb-2 pt-4">
+        <div className="flex items-start justify-between gap-2">
+          <h3 dir="auto" className="line-clamp-2 min-w-0 flex-1 font-display text-lg font-bold leading-snug sm:text-xl">{course.title}</h3>
+          <CourseStatusBadge status={course.status} lifecycle={course.lifecycle} className="mt-0.5 shrink-0 whitespace-nowrap" />
+        </div>
+        {course.teacher && <p dir="auto" className="mt-1 text-sm text-mute">{course.teacher}</p>}
+        {course.shortDescription && <p dir="auto" className="mt-3 line-clamp-3 text-sm text-mute">{course.shortDescription}</p>}
+
+        {/* Overall course start / end = first class start and last class end, exactly as stored by the backend (IST). */}
+        <dl className="mt-4 space-y-1 text-sm">
+          {course.startDate && <div className="flex gap-1.5"><dt className="w-12 shrink-0 text-mute">Start</dt><dd className="font-medium">{course.sessions?.length ? formatIstFull(course.startDate) : formatDate(course.startDate)}</dd></div>}
+          {course.endDate && <div className="flex gap-1.5"><dt className="w-12 shrink-0 text-mute">End</dt><dd className="font-medium">{course.sessions?.length ? formatIstFull(course.endDate) : formatDate(course.endDate)}</dd></div>}
+          <div className="flex gap-1.5"><dt className="sr-only">Price</dt><dd className="font-bold text-accent">{formatPrice(course.price, course.currency)}</dd></div>
+        </dl>
+
+        <span className={`${course.status === "enrollment_open" ? "btn-primary" : "btn-outline"} mt-auto w-full justify-center [margin-top:1.25rem]`}>
+          {s.cta}<Icon name="arrow" size={15} className="rtl:rotate-180" />
+        </span>
+      </div>
+    </Link>
+  );
+}
+
+/** Compact home-page card: same footprint as the "Latest posts" card (16:9 image + title row, status to the right of the title). */
+export function CourseCompactCard({ course }) {
+  const thumb = mediaUrl(course.thumbnailKey);
+  const meta = [course.teacher, formatPrice(course.price, course.currency)].filter(Boolean).join(" · ");
+  return (
+    <Link to={`/courses/${course.slug}`} className="card-lift group flex h-full flex-col rounded-2xl border border-rule bg-card p-3">
+      <div className="aspect-[16/9] w-full overflow-hidden rounded-xl bg-tint">
+        {thumb ? (
+          <img src={thumb} alt="" loading="lazy" decoding="async" className="h-full w-full object-cover transition-transform duration-500 ease-out group-hover:scale-[1.06]" />
+        ) : (
+          <div className="grid h-full w-full place-items-center text-accent/50"><Icon name="cap" size={44} /></div>
+        )}
+      </div>
+      <div className="flex flex-1 items-start px-3 pb-3 pt-4">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start justify-between gap-2">
+            <h3 dir="auto" className="line-clamp-2 min-w-0 flex-1 font-display text-lg font-bold leading-snug sm:text-xl">{course.title}</h3>
+            <CourseStatusBadge status={course.status} lifecycle={course.lifecycle} className="mt-0.5 shrink-0 whitespace-nowrap" />
+          </div>
+          {meta && <span dir="auto" className="mt-2 block text-xs text-mute">{meta}</span>}
+        </div>
+      </div>
+      <div className="flex justify-center px-3 pb-3">
+        {course.status === "enrollment_open" ? (
+          <span className="btn-primary min-w-[10.5rem] !gap-2 !px-6 !py-2 !text-sm">Enroll Now<Icon name="arrow" size={15} className="rtl:rotate-180" /></span>
+        ) : (
+          <span className="btn-outline min-w-[10.5rem] !gap-2 !px-6 !py-2 !text-sm">View Details<Icon name="arrow" size={15} className="rtl:rotate-180" /></span>
+        )}
+      </div>
+    </Link>
+  );
+}
+
+export function CourseGrid({ courses }) {
+  return (
+    <div className="grid items-stretch gap-5 sm:grid-cols-2 lg:grid-cols-3">
+      {courses.map((c) => <CourseCard key={c.id} course={c} />)}
+    </div>
+  );
+}
+
+/** Home page section — loads independently so a failure here never blanks the rest of the page. */
+export function CoursesSection() {
+  const { data, error, loading, reload } = useAsync((signal) => publicApi.courses(signal), []);
+  useCourseListClock(data, reload); // re-fetches at the exact next transition, so cards flip to LIVE NOW / Completed / gone on time
+  const visible = (data || []).slice(0, 3);
+
+  return (
+    <section className="container-page pb-16 pt-2 sm:pb-24" aria-labelledby="courses-heading">
+      <div className="flex items-end justify-between gap-4">
+        <SectionHeading title={<span id="courses-heading">Our Courses</span>} />
+        {(data?.length || 0) > 0 && (
+          <Link to="/courses" className="inline-flex shrink-0 items-center gap-1.5 rounded-full border px-4 py-1.5 text-sm font-medium view-all transition hover:bg-btn hover:text-white">
+            View all <Icon name="arrow" size={15} className="rtl:rotate-180" />
+          </Link>
+        )}
+      </div>
+      <div className="mt-8">
+        {loading && !data ? <CardSkeletons /> : error && !data ? <ErrorState error={error} onRetry={reload} /> : visible.length === 0 ? <EmptyState>No courses are available yet. Please check back soon.</EmptyState> : (
+          <div className="grid items-stretch gap-5 md:grid-cols-3">
+            {visible.map((c, i) => (
+              <div key={c.id} className={i === 0 ? "" : "hidden md:block"}>
+                <CourseCompactCard course={c} />
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}

@@ -1,0 +1,35 @@
+name = "atharitvbackend"
+main = "src/index.js"
+
+# Node.js compatibility (needed by the MongoDB Node.js driver for
+# `cloudflare:sockets` support) is enabled by default for any
+# compatibility_date of 2026-08-04 or later, so no explicit
+# `nodejs_compat` compatibility flag is needed or accepted here.
+# Keep this set to today's date when you touch this file.
+compatibility_date = "2026-09-27"
+
+# Keep variables that were added in the Cloudflare dashboard (e.g.
+# IMAGEKIT_URL_ENDPOINT) instead of deleting them on every deploy.
+keep_vars = true
+
+# Non-secret configuration. Real secrets (MONGODB_URI, etc.) must be set with
+# `wrangler secret put <NAME>` and must never be committed here.
+[vars]
+ENVIRONMENT = "production"
+ALLOWED_ORIGIN = "https://atharitv-website.pages.dev"
+# Media storage: Cloudflare R2 (bucket bound below as MEDIA_BUCKET). Files are
+# served through the Worker at /api/public/media/:key; the bucket is not public.
+# Old ImageKit-era keys keep working via a redirect while IMAGEKIT_URL_ENDPOINT is set.
+MEDIA_PROVIDER = "r2"
+
+# R2 bucket binding for scanned pages / images / PDFs. This mirrors the binding that
+# already exists on the production Worker (same name + bucket) so a `wrangler deploy`
+# does not drop it. It does not create a second binding.
+[[r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "atharitv-media"
+
+# YouTube live-session sync (optional). Uncomment AFTER YOUTUBE_API_KEY and
+# YOUTUBE_CHANNEL_ID are set as secrets; until then the job is a no-op anyway.
+# [triggers]
+# crons = ["*/10 * * * *"]

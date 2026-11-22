@@ -1,0 +1,586 @@
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Divider } from "../../components/article/Divider.jsx";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import { adminApi } from "../../services/admin.js";
+import { useAsync } from "../../lib/useAsync.js";
+import { isSlug, slugify } from "../../lib/format.js";
+import { referenceIdsOf, withIds } from "../../lib/blocks.js";
+import { applyEdits, cleanBlocksHl } from "../../lib/highlights.js";
+import { setLineHeading } from "../../lib/lineHeading.js";
+import AdminDock from "../components/AdminDock.jsx";
+import { detectLang } from "../../lib/versions.js";
+import { flattenTree, folderLabel } from "../../lib/folders.js";
+import { ArticleView } from "../../components/article/ArticleView.jsx";
+import { PublicLayout } from "../../layouts/PublicLayout.jsx";
+import { ErrorState, Skeleton } from "../../components/ui/feedback.jsx";
+import { Field, Modal, StatusBadge, useConfirm, useToast } from "../components/ui.jsx";
+import { moveBlock, removeBlock } from "../../lib/groups.js";
+import MoveBar, { useBlockSelect } from "../components/BlockMover.jsx";
+import { FolderForm } from "../components/FolderForm.jsx";
+import { MediaUploader } from "../components/MediaUploader.jsx";
+import { VersionsPanel } from "../components/VersionsPanel.jsx";
+import { Icon } from "../../components/ui/icons.jsx";
+import { useNoPattern } from "../../lib/useNoPattern.js";
+import { LANG_KEY_BY_CODE, useI18n } from "../../i18n/index.jsx";
+
+const TITLE_BACKUP = "fs_compose_title";
+const readTitle = () => { try { return localStorage.getItem(TITLE_BACKUP) || ""; } catch { return ""; } };
+const writeTitle = (v) => { try { v ? localStorage.setItem(TITLE_BACKUP, v) : localStorage.removeItem(TITLE_BACKUP); } catch { /* ignore */ } };
+const cleanTr = (tr) => Object.fromEntries(Object.entries(tr || {}).filter(([, v]) => v && String(v).trim()));
+const clock = () => new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+/**
+ * The working copy of a stored post: a live post keeps edits that are not published yet in `pending`
+ * (blocks + the settings that were changed with them); for everything else it is the post itself.
+ */
+function workOf(a) {
+  const p = a.pending;
+  const m = (p && p.meta) || {};
+  const pick = (k) => (m[k] !== undefined ? m[k] : a[k]);
+  return {
+    title: pick("title") || "", titleTr: pick("titleTr") || {}, categoryId: pick("categoryId"), topicId: pick("topicId") || "",
+    coverKey: pick("coverKey") || "", excerpt: pick("excerpt") || "", seoTitle: pick("seoTitle") || "", seoDescription: pick("seoDescription") || "", slug: pick("slug"),
+    blocks: (p ? p.blocks : a.blocks) || [],
+  };
+}
+// Version token for the next save: a live post is saved into its unpublished copy (rev), anything else is saved as the post (updatedAt).
+const revOf = (a) => (a.status === "published" ? a.rev : a.updatedAt);
+
+/**
+ * "New article" as a live page: the post looks exactly like it will on the site (heading, paragraphs, references,
+ * images ...). The heading is a field at the top; under every block there are Edit / Up / Down / Delete / Add buttons.
+ * Every Save stores the WHOLE post as a draft (the first one creates it), so nothing is lost if the browser reloads the tab.
+ * Category, folder, cover image and the Hindi / Urdu / Roman converter live BELOW the page (after a divider), so the
+ * post on top is never covered.
+ */
+export default function ArticleComposer() {
+  useNoPattern(); // post pages: plain page colour, no geometric pattern
+  const { id: routeId } = useParams();
+  const toast = useToast();
+  const [confirm, dialog] = useConfirm();
+  const nav = useNavigate();
+  const { pinLang, contentLang } = useI18n();
+  // Same three switches as on the live post page: Highlight / Add buttons / Edit buttons.
+  const [hlOn, setHlOn] = useState(false);
+  const [addOn, setAddOn] = useState(!routeId); // existing post: OFF; empty new post: ON (needs it to write the first block)
+  const [editOn, setEditOn] = useState(false);
+
+  const [id, setId] = useState(routeId || null);
+  const [title, setTitle] = useState(() => (routeId ? "" : readTitle()));
+  const [blocks, setBlocks] = useState([]);
+  const sel = useBlockSelect(blocks); // Select & Move: tick written blocks and move them into a Block
+  const [refs, setRefs] = useState([]);
+  const [meta, setMeta] = useState({ categoryId: "", topicId: "", slug: "", status: "draft", sourceLanguage: "", langLocked: false });
+  const [extra, setExtra] = useState({ titleTr: {}, coverKey: "", excerpt: "", seoTitle: "", seoDescription: "" }); // converted heading, cover image, excerpt + SEO texts (saved with the post)
+  const [status, setStatus] = useState({ text: "", tone: "", detail: "", time: "" }); // text: Saving… / Saved ✓ / Failed, retry
+  const [busy, setBusy] = useState(false);
+  const [hasPending, setHasPending] = useState(false); // live post with edits that are not published yet
+  const [addFolder, setAddFolder] = useState(false);
+
+  const latest = useRef({});
+  latest.current = { id, title, blocks, meta, refs, extra };
+  const rev = useRef(null); // updatedAt of the stored copy this page is based on
+  const savedTitle = useRef("");
+  const savedTr = useRef("{}"); // converted headings as last stored
+  const savedSeo = useRef(""); // slug / excerpt / SEO texts as last stored (blur saves only when they changed)
+  const seoKey = (m, x) => JSON.stringify([m.slug || "", x.excerpt || "", x.seoTitle || "", x.seoDescription || ""]);
+  const chain = useRef(Promise.resolve());
+
+  // Save card (top right): folded by default; on every change it shakes / peeks open for 2 s and shows Save Draft, then folds again.
+  const [barOpen, setBarOpen] = useState(false); // opened by hand: stays until folded by hand
+  const [peek, setPeek] = useState(false);
+  const barOpenRef = useRef(false);
+  const peekRef = useRef(false);
+  const peekTimer = useRef(null);
+  const armed = useRef(false); // ignores the changes caused by loading the post
+  const cardRef = useRef(null);
+  barOpenRef.current = barOpen;
+  const closePeek = () => { peekRef.current = false; setPeek(false); };
+  const nudge = () => {
+    if (barOpenRef.current) return;
+    clearTimeout(peekTimer.current);
+    if (!peekRef.current) { peekRef.current = true; setPeek(true); }
+    peekTimer.current = setTimeout(closePeek, 2000);
+  };
+  const toggleBar = () => { clearTimeout(peekTimer.current); closePeek(); setBarOpen((v) => !v); };
+  useEffect(() => () => clearTimeout(peekTimer.current), []);
+  useEffect(() => () => pinLang(null), []); // leaving the post: the navbar language applies again
+
+  const cats = useAsync((s) => adminApi.categories.list({ status: "active" }, s), []);
+  const topicsRes = useAsync((s) => (meta.categoryId ? adminApi.topics.list({ categoryId: meta.categoryId }, s) : []), [meta.categoryId]);
+  const topicOptions = flattenTree((topicsRes.data || []).filter((t) => t.status === "active" || t.id === meta.topicId));
+
+  // Puts a stored post (its working copy: unpublished edits first) on the page.
+  function applyArticle(a) {
+    const w = workOf(a);
+    const bl = withIds(w.blocks);
+    const locked = bl.some((b) => typeof b.text === "string" && b.text.trim());
+    // the stored original language is permanent for a post that already has text
+    const nextMeta = { categoryId: w.categoryId, topicId: w.topicId, slug: w.slug, status: a.status, sourceLanguage: a.sourceLanguage || a.language, langLocked: locked };
+    const nextExtra = { titleTr: w.titleTr, coverKey: w.coverKey, excerpt: w.excerpt, seoTitle: w.seoTitle, seoDescription: w.seoDescription };
+    savedSeo.current = seoKey(nextMeta, nextExtra);
+    setTitle(w.title); savedTitle.current = w.title;
+    savedTr.current = JSON.stringify(cleanTr(w.titleTr));
+    setBlocks(bl); setMeta(nextMeta); setExtra(nextExtra);
+    setHasPending(!!a.pending);
+    rev.current = revOf(a);
+    latest.current = { ...latest.current, id: a.id, title: w.title, blocks: bl, meta: nextMeta, extra: nextExtra };
+    return { ...w, blocks: bl };
+  }
+
+  // An existing article opens with its stored content.
+  const loaded = useAsync(async (s) => {
+    if (!routeId) return null;
+    const a = await adminApi.articles.get(routeId, s);
+    const w = applyArticle(a);
+    pinLang(LANG_KEY_BY_CODE[a.sourceLanguage || a.language]);
+    if (!w.blocks.length) setAddOn(true);
+    const found = await Promise.all(referenceIdsOf(w.blocks).map((r) => adminApi.references.get(r, s).catch(() => null)));
+    setRefs(found.filter(Boolean));
+    return a;
+  }, [routeId]);
+
+  // First run: no categories yet -> create "Aqaid" and "Masail" so the dropdown is never empty (same as the form editor).
+  const seeded = useRef(false);
+  useEffect(() => {
+    if (!cats.data || cats.data.length || seeded.current) return;
+    seeded.current = true;
+    Promise.all([["Aqaid", "aqaid", "aqeedah"], ["Masail", "masail", "masail"]].map(([name, slug, type], ordering) => adminApi.categories.create({ name, slug, description: null, type, status: "active", ordering })))
+      .then(() => cats.reload()).catch(() => {});
+  }, [cats.data]);
+  useEffect(() => { if (!routeId && !meta.categoryId && cats.data?.[0]) setMeta((m) => ({ ...m, categoryId: cats.data[0].id })); }, [routeId, cats.data, meta.categoryId]);
+
+  /**
+   * Stores the whole post. `mutate(currentBlocks)` returns the new blocks (omit it to save as it is now).
+   * Calls run one after another, so a heading autosave and a block save can never overtake each other.
+   */
+  function persist(mutate, titleNow) {
+    setStatus({ text: "Saving…", tone: "", detail: "", time: "" });
+    const run = async () => {
+      const cur = latest.current;
+      const t = (titleNow ?? cur.title).trim();
+      if (!t) throw new Error("Pehle upar heading likhein, uske baad hi post save hogi.");
+      if (!cur.meta.categoryId) throw new Error("Pehle category chuniye (neeche Post settings mein Category).");
+      const base = withIds(cur.blocks);
+      const next = mutate ? mutate(base) : base;
+      // original language: the one chosen / stored for this post; detected from the text only while nothing has been chosen yet
+      const language = cur.meta.sourceLanguage || detectLang(t, next) || "en";
+      const body = {
+        categoryId: cur.meta.categoryId, topicId: cur.meta.topicId || null, title: t, language, sourceLanguage: language,
+        blocks: cleanBlocksHl(next, language), references: referenceIdsOf(next),
+        titleTr: cleanTr(cur.extra.titleTr),
+        coverKey: cur.extra.coverKey || null,
+        excerpt: (cur.extra.excerpt || "").trim() || null,
+        seoTitle: (cur.extra.seoTitle || "").trim() || null,
+        seoDescription: (cur.extra.seoDescription || "").trim() || null,
+      };
+      // the link name: the one typed in Post settings (a valid one), else made from the heading on the first save
+      const typedSlug = isSlug(cur.meta.slug) ? cur.meta.slug : "";
+      let a;
+      if (!cur.id) {
+        let slug = typedSlug || (isSlug(slugify(t)) ? slugify(t) : "article-" + Math.random().toString(36).slice(2, 8));
+        try { a = await adminApi.articles.create({ ...body, slug }); } catch (e) {
+          if (!/slug/i.test(e.message)) throw e;
+          a = await adminApi.articles.create({ ...body, slug: `${slug}-${Math.random().toString(36).slice(2, 6)}` });
+        }
+        setId(a.id);
+        try { window.history.replaceState(null, "", `/admin/articles/${a.id}`); } catch { /* ignore */ }
+        writeTitle("");
+      } else if (cur.meta.status === "published") {
+        // Live post: the edit goes into the unpublished copy; visitors keep seeing the published text until "Publish changes".
+        const res = await adminApi.articles.saveDraft(cur.id, {
+          blocks: body.blocks, references: body.references, baseRev: rev.current,
+          meta: {
+            title: t, titleTr: body.titleTr, categoryId: body.categoryId, topicId: body.topicId, coverKey: body.coverKey,
+            excerpt: body.excerpt, seoTitle: body.seoTitle, seoDescription: body.seoDescription, ...(typedSlug ? { slug: typedSlug } : {}),
+          },
+        });
+        a = res.article;
+      } else {
+        a = await adminApi.articles.update(cur.id, { ...body, ...(typedSlug ? { slug: typedSlug } : {}), baseUpdatedAt: rev.current });
+      }
+      const w = workOf(a);
+      rev.current = revOf(a);
+      setHasPending(!!a.pending);
+      savedTitle.current = w.title;
+      savedTr.current = JSON.stringify(body.titleTr);
+      savedSeo.current = seoKey({ slug: w.slug }, w);
+      const saved = withIds(w.blocks);
+      // Updated at once (not only on the next render) so a queued save sees the new id / blocks.
+      const lockedNow = saved.some((b) => typeof b.text === "string" && b.text.trim());
+      latest.current = { ...latest.current, id: a.id, blocks: saved, meta: { ...latest.current.meta, slug: w.slug, status: a.status, sourceLanguage: lockedNow ? (a.sourceLanguage || a.language) : latest.current.meta.sourceLanguage, langLocked: lockedNow } };
+      setBlocks(saved);
+      setMeta((m) => ({ ...m, slug: w.slug, status: a.status, sourceLanguage: lockedNow ? (a.sourceLanguage || a.language) : m.sourceLanguage, langLocked: lockedNow }));
+      // references used by the blocks are loaded so they are drawn straight away
+      const known = new Map(cur.refs.map((r) => [r.id, r]));
+      const need = referenceIdsOf(w.blocks);
+      const fresh = await Promise.all(need.map((rid) => (known.has(rid) ? known.get(rid) : adminApi.references.get(rid).catch(() => null))));
+      setRefs(fresh.filter(Boolean));
+      setStatus({ text: a.status === "published" ? "Saved ✓ (abhi live nahi)" : "Saved ✓", tone: "ok", detail: "", time: clock() });
+      return a;
+    };
+    const p = chain.current.then(run);
+    chain.current = p.catch(() => {});
+    return p;
+  }
+
+  async function saveNow() {
+    setBusy(true);
+    try { await persist(); } catch (e) { fail(e); } finally { setBusy(false); }
+  }
+
+  // Draft: "Publish". Live post: "Publish changes" - only now do the unpublished edits go live.
+  async function publishNow() {
+    setBusy(true);
+    try {
+      const saved = await persist(); // flushes the latest edit into the working copy first
+      const r = await adminApi.articles.action(saved.id, "publish");
+      applyArticle(r);
+      setStatus({ text: "Saved ✓", tone: "ok", detail: "", time: clock() });
+      toast(live ? "Changes live ho gaye" : "Post publish ho gayi");
+    } catch (e) { fail(e); } finally { setBusy(false); }
+  }
+
+  async function unpublishNow() {
+    if (!(await confirm({ title: "Post unpublish karein?", message: "Post site se hat jayegi aur draft ban jayegi. Aapke likhe hue badlav safe rahenge.", confirm: "Unpublish" }))) return;
+    setBusy(true);
+    try {
+      await chain.current;
+      const r = await adminApi.articles.action(latest.current.id, "unpublish");
+      applyArticle(r);
+      toast("Post draft mein wapas gayi");
+    } catch (e) { toast(e.message, "error"); } finally { setBusy(false); }
+  }
+
+  // Drops the unpublished edits; the live post stays exactly as visitors see it.
+  async function discardChanges() {
+    if (!(await confirm({ title: "Changes hatayein?", message: "Publish nahi kiye hue saare badlav hat jayenge. Live post jaisi abhi hai waisi hi rahegi.", confirm: "Yes, hatao", danger: true }))) return;
+    setBusy(true);
+    try {
+      const p = chain.current.then(async () => {
+        const res = await adminApi.articles.discardDraft(latest.current.id);
+        applyArticle(res.article);
+        setRefs(res.references || []);
+      });
+      chain.current = p.catch(() => {});
+      await p;
+      setStatus({ text: "", tone: "", detail: "", time: "" });
+      toast("Changes hat gaye — live post pehle jaisi hai");
+    } catch (e) { toast(e.message, "error"); } finally { setBusy(false); }
+  }
+
+  // The heading is saved as soon as the admin leaves the field (only when it changed).
+  function onTitleBlur() {
+    if (onTrTitle) {
+      // the converted heading on screen: stored with the post when it changed
+      if (JSON.stringify(cleanTr(extra.titleTr)) === savedTr.current || !title.trim() || !meta.categoryId) return;
+      persist().catch((e) => setStatus({ text: "Failed, retry", tone: "err", detail: e.message, time: "" }));
+      return;
+    }
+    const t = title.trim();
+    if (!t || t === savedTitle.current) return;
+    if (!meta.categoryId) return;
+    persist(undefined, t).catch((e) => setStatus({ text: "Failed, retry", tone: "err", detail: e.message, time: "" }));
+  }
+
+  function fail(e) { setStatus({ text: "Failed, retry", tone: "err", detail: e.message, time: "" }); toast(e.message, "error"); }
+
+  // Slug / excerpt / SEO fields: typing only changes the page; the post is stored when the admin leaves the field.
+  function typeExtra(patch) { latest.current = { ...latest.current, extra: { ...latest.current.extra, ...patch } }; setExtra((x) => ({ ...x, ...patch })); }
+  function typeSlug(v) { latest.current = { ...latest.current, meta: { ...latest.current.meta, slug: v } }; setMeta((m) => ({ ...m, slug: v })); }
+  function onSeoBlur() {
+    const cur = latest.current;
+    const fixed = slugify(cur.meta.slug || "");
+    if (fixed !== cur.meta.slug) typeSlug(fixed);
+    if (fixed && !isSlug(fixed)) return toast("Link naam mein sirf a-z, 0-9 aur '-' chalte hain.", "error");
+    if (!cur.id) return; // before the first save these wait and are stored with it
+    if (!fixed) { // an empty link name is not allowed: back to the stored one
+      const back = JSON.parse(savedSeo.current)[0];
+      typeSlug(back); return;
+    }
+    if (seoKey({ slug: fixed }, cur.extra) === savedSeo.current || !cur.title.trim()) return;
+    persist().catch(fail);
+  }
+
+  // Floating card "Settings": smooth scroll to the Post settings section below the page.
+  function goSettings() {
+    const el = document.getElementById("post-settings");
+    if (!el) return;
+    const calm = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    el.scrollIntoView({ behavior: calm ? "auto" : "smooth", block: "start" });
+  }
+
+  // Settings below the page: stored together with the post as soon as the post exists (before that they wait for the first save).
+  function updateMeta(patch) {
+    latest.current = { ...latest.current, meta: { ...latest.current.meta, ...patch } };
+    setMeta((m) => ({ ...m, ...patch }));
+    if (latest.current.id && latest.current.title.trim()) persist().catch(fail);
+  }
+  function updateExtra(patch, save = true) {
+    latest.current = { ...latest.current, extra: { ...latest.current.extra, ...patch } };
+    setExtra((x) => ({ ...x, ...patch }));
+    if (save && latest.current.id && latest.current.title.trim()) persist().catch(fail);
+  }
+  // The Hindi / Urdu / Roman converter edits blocks + converted heading; the pasted result is stored straight away.
+  const setTitleTr = (titleTr) => updateExtra({ titleTr }, false);
+  const setBlocksSaved = (next) => {
+    latest.current = { ...latest.current, blocks: next };
+    setBlocks(next);
+    persist(() => next).catch(fail);
+  };
+
+  const inline = !addOn ? undefined : {
+    scope: id || "new",
+    onInsert: async (index, block, afterId) => {
+      await persist((cur) => {
+        const at = afterId && cur.some((b) => b.id === afterId) ? cur.findIndex((b) => b.id === afterId) : Math.min(index, cur.length - 1);
+        return [...cur.slice(0, at + 1), block, ...cur.slice(at + 1)];
+      });
+    },
+  };
+  const edit = !editOn ? undefined : {
+    saveLabel: meta.status === "published" ? "Save (abhi live nahi)" : "Save Draft",
+    onSave: async (index, nb) => {
+      await persist((cur) => {
+        let at = nb.id ? cur.findIndex((b) => b.id === nb.id) : -1;
+        if (at < 0) at = index;
+        if (at < 0 || at >= cur.length) throw new Error("Ye hissa post mein nahi mila. Page refresh karke dobara koshish karein.");
+        return cur.map((b, i) => (i === at ? { ...nb, id: b.id } : b));
+      });
+    },
+    // Up / Down: swaps the block with its neighbour and stores the new order.
+    onMove: async (index, dir, blockId) => {
+      await persist((cur) => {
+        const id = blockId || cur[index]?.id;
+        if (!id) return cur;
+        return moveBlock(cur, id, dir); // a Block moves with everything inside it; a block inside a Block stays in it (lib/groups.js)
+      });
+    },
+    // Delete (the confirmation "Yes, Delete / Cancel" is asked before this is called).
+    onRemove: async (index, blockId) => {
+      const wasBlock = latest.current.blocks.some((b) => b.id === blockId && b.type === "group");
+      await persist((cur) => {
+        const next = removeBlock(cur, blockId, index); // deleting a Block deletes everything inside it
+        if (!next) throw new Error("Ye hissa post mein nahi mila. Page refresh karke dobara koshish karein.");
+        return next;
+      });
+      toast(wasBlock ? "Block hat gaya, andar ka content post mein hai" : "Hissa delete ho gaya");
+    },
+  };
+
+  // Highlight: only the selected words are marked; stored with the post like any other edit.
+  const editor = hlOn && id ? {
+    enabled: true,
+    onApply: async (edits) => { await persist((cur) => applyEdits(cur, edits)); },
+    // Heading (H2 / H3 / paragraph) of the selected line(s): original script only, see lib/lineHeading.js
+    onTransform: async (pieces, level) => {
+      let error = "";
+      await persist((cur) => {
+        const res = setLineHeading(cur, latest.current.meta.sourceLanguage || detectLang(latest.current.title, cur) || "en", pieces, level);
+        error = res.error;
+        if (res.error) throw new Error(res.error);
+        return res.blocks;
+      }).catch((e) => { if (!error) throw e; });
+      return error;
+    },
+    onAlign: async (blockId, align) => { await persist((cur) => cur.map((b) => (b.id === blockId ? { ...b, align } : b))); },
+  } : undefined;
+
+  useEffect(() => {
+    if (routeId && !loaded.data) return undefined;
+    const t = setTimeout(() => { armed.current = true; }, 1200);
+    return () => clearTimeout(t);
+  }, [routeId, !!loaded.data]);
+  useEffect(() => { if (armed.current) nudge(); }, [title, blocks, extra, meta.categoryId, meta.topicId, meta.sourceLanguage]);
+  useEffect(() => {
+    const el = cardRef.current;
+    if (!peek || !el || !el.animate || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    el.animate([{ transform: "translateX(0)" }, { transform: "translateX(-7px)" }, { transform: "translateX(6px)" }, { transform: "translateX(-3px)" }, { transform: "translateX(0)" }], { duration: 380, easing: "ease-out" });
+  }, [peek]);
+
+  // The heading looks like the post's own heading (big, no box); it grows with the text.
+  const titleRef = useRef(null);
+  // The heading follows the language chosen in the navbar: in another script it shows (and edits) the converted heading, if there is one.
+  const baseLang = meta.sourceLanguage || detectLang(title, blocks) || "en";
+  const onTrTitle = contentLang !== baseLang && typeof extra.titleTr?.[contentLang] === "string";
+  const titleShown = onTrTitle ? extra.titleTr[contentLang] : title;
+  useLayoutEffect(() => {
+    const el = titleRef.current;
+    if (el) { el.style.height = "auto"; el.style.height = el.scrollHeight + "px"; }
+  }, [titleShown, loaded.data]);
+  const titleField = (
+    <div dir="ltr" className="font-sans">
+      <textarea
+        ref={titleRef}
+        rows={1}
+        className="block w-full resize-none overflow-hidden border-0 border-b-2 border-dashed border-rule bg-transparent px-0 py-1 font-display text-3xl font-semibold leading-[1.25] text-ink outline-none transition-colors placeholder:text-mute/50 focus:border-accent sm:text-5xl"
+        dir="auto"
+        autoFocus={!routeId}
+        placeholder="Heading"
+        value={titleShown}
+        onChange={(e) => {
+          if (onTrTitle) { updateExtra({ titleTr: { ...extra.titleTr, [contentLang]: e.target.value } }, false); return; }
+          setTitle(e.target.value); if (!id) writeTitle(e.target.value);
+        }}
+        onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); e.currentTarget.blur(); } }}
+        onBlur={onTitleBlur}
+        aria-label="Heading"
+      />
+    </div>
+  );
+
+  if (routeId && loaded.loading && !loaded.data) return <PublicLayout><div className="container-read space-y-4 py-16"><Skeleton className="h-10 w-4/5" /><Skeleton className="h-40 w-full" /></div></PublicLayout>;
+  if (routeId && loaded.error && !loaded.data) return <PublicLayout><div className="container-read py-16"><ErrorState error={loaded.error} onRetry={loaded.reload} /></div></PublicLayout>;
+
+  const live = meta.status === "published";
+  const lang = meta.sourceLanguage || detectLang(title, blocks) || "en";
+  return (
+    <PublicLayout>
+      <div dir="ltr" className="fixed left-4 top-[4.75rem] z-[45] font-sans text-ink">
+        {barOpen || peek ? (
+          <div ref={cardRef} onPointerDown={() => { if (peekRef.current) nudge(); }} className="animate-fade w-[50vw] min-w-[11.5rem] max-w-[20rem] space-y-2 rounded-xl border border-rule bg-card/95 p-2.5 text-xs shadow-elev backdrop-blur">
+            <div className="flex items-center gap-2">
+              <Link to="/admin/articles" className="text-mute hover:text-ink">← Articles</Link>
+              {id && <StatusBadge status={meta.status} />}
+              <button type="button" onClick={goSettings} className="a-btn ms-auto !px-2 !py-0.5">Settings</button>
+              <button type="button" onClick={toggleBar} aria-label="Card band karein" title="Band karein" className="grid h-6 w-6 place-items-center rounded-full text-mute hover:bg-tint hover:text-ink"><Icon name="up" size={16} /></button>
+            </div>
+            <div className="flex flex-wrap items-center gap-1" role="group" aria-label="Original language">
+              <span className="text-mute">Original:</span>
+              {[["en", "Roman"], ["hi", "Hindi"], ["ur", "Urdu"]].map(([code, label]) => (
+                <button key={code} type="button" disabled={meta.langLocked} aria-pressed={lang === code}
+                  title={meta.langLocked ? "Post ki original zabaan permanent hai (text likha ja chuka hai)" : `${label} mein likh rahe hain`}
+                  onClick={() => { updateMeta({ sourceLanguage: code }); pinLang(LANG_KEY_BY_CODE[code]); }}
+                  className={`rounded-full border px-2 py-0.5 ${lang === code ? "border-ink bg-tint font-semibold" : "border-rule"} disabled:opacity-60`}>{label}</button>
+              ))}
+              {meta.langLocked && <span aria-hidden="true" className="text-mute">🔒</span>}
+            </div>
+            <div className="flex min-h-[1rem] items-center gap-2" role="status" aria-live="polite">
+              <p title={status.time ? `Last saved ${status.time}` : undefined} className={`font-semibold ${status.tone === "err" ? "text-ad-danger" : status.tone === "ok" ? "text-ad-ok" : "text-mute"}`}>{status.text || (id ? "" : "Naya post — heading likhein")}</p>
+              {status.tone === "err" && <button type="button" className="a-btn !px-2 !py-0.5" disabled={busy} onClick={saveNow}>Retry</button>}
+            </div>
+            {status.tone === "err" && status.detail && <p className="text-[11px] text-mute">{status.detail}</p>}
+            {live && hasPending && <p className="font-semibold text-ad-warn">Unpublished changes — live post abhi purani hai</p>}
+            <div className="flex gap-1.5">
+              <button type="button" className="a-btn flex-1 !px-2 !py-1" disabled={busy} onClick={saveNow}>{busy ? "Saving…" : live ? "Save Changes" : "Save Draft"}</button>
+              <button type="button" className="a-btn-primary btn-cta flex-1 !px-2 !py-1" disabled={busy || (live && !hasPending)} title={live && !hasPending ? "Koi unpublished change nahi hai" : undefined} onClick={publishNow}>{live ? "Publish changes" : "Publish"}</button>
+            </div>
+            {live && (
+              <div className="flex gap-1.5">
+                {hasPending && <button type="button" className="a-btn flex-1 !px-2 !py-1" disabled={busy} onClick={discardChanges}>Discard changes</button>}
+                <button type="button" className="a-btn flex-1 !px-2 !py-1" disabled={busy} onClick={unpublishNow}>Unpublish</button>
+              </div>
+            )}
+          </div>
+        ) : (
+          <button type="button" onClick={toggleBar} aria-label="Save card kholein" title="Save / Publish kholein" className="animate-fade inline-flex items-center gap-1.5 rounded-full border border-rule bg-card/95 px-3 py-1.5 text-xs font-semibold shadow-elev backdrop-blur hover:bg-tint">
+            <Icon name="down" size={14} />{live ? (hasPending ? "Live · changes pending" : "Live post") : "Draft"}
+            {status.tone === "err" && <span className="h-2 w-2 rounded-full bg-ad-danger" aria-label="Error" />}
+          </button>
+        )}
+      </div>
+      <ArticleView
+        article={{ title, language: lang, blocks, titleTr: null, coverKey: extra.coverKey || null, excerpt: extra.excerpt || null, createdAt: new Date().toISOString() }}
+        references={refs}
+        titleNode={titleField}
+        hideLanguage
+        split={false}
+        showFontControls={false}
+        editor={editor}
+        inline={inline}
+        edit={edit}
+        select={sel.on ? sel : undefined}
+      />
+      <MoveBar sel={sel} blocks={blocks} apply={(mutate) => persist(mutate)} />
+
+      <AdminDock extra="font-sans" resetKey={routeId || "new"}>
+        <button type="button" aria-pressed={hlOn} disabled={!id} onClick={() => setHlOn((v) => !v)} className="text-start font-semibold disabled:opacity-50">
+          Admin · Highlight mode: {hlOn ? "ON" : "OFF"}
+        </button>
+        <button type="button" aria-pressed={addOn} onClick={() => setAddOn((v) => !v)} className="text-start font-semibold">
+          Admin · Add buttons: {addOn ? "ON" : "OFF"}
+        </button>
+        <button type="button" aria-pressed={editOn} onClick={() => setEditOn((v) => !v)} className="text-start font-semibold">
+          Admin · Edit buttons: {editOn ? "ON" : "OFF"}
+        </button>
+        <button type="button" aria-pressed={sel.on} disabled={!id || !blocks.length} onClick={() => sel.setOn(!sel.on)} className="text-start font-semibold disabled:opacity-50">
+          Admin · Select &amp; Move to Block: {sel.on ? "ON" : "OFF"}
+        </button>
+        {hlOn && id && <span className="text-mute">Text select karein, phir Highlight dabayein.</span>}
+        {!id && <span className="text-mute">Highlight ke liye pehle post save karein.</span>}
+      </AdminDock>
+
+      {/* Settings: below the live page, after a divider, above the footer. */}
+      <section id="post-settings" dir="ltr" className="container-article scroll-mt-24 pb-16 pt-6 font-sans text-ink" aria-label="Post settings">
+        <Divider className="my-8" />
+        <h2 className="text-lg font-semibold">Post settings</h2>
+        <div className="mb-4" />
+
+        <div className="space-y-4">
+          <div className="a-card space-y-3 p-4">
+            <h3 className="text-sm font-semibold">Category &amp; Folder</h3>
+            <Field label="Category *">
+              <select className="a-input" value={meta.categoryId} onChange={(e) => updateMeta({ categoryId: e.target.value, topicId: "" })}>
+                {[["aqeedah", "Aqaid"], ["masail", "Masail"]].map(([type, label]) => {
+                  const items = (cats.data || []).filter((c) => c.type === type);
+                  return items.length ? <optgroup key={type} label={label}>{items.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</optgroup> : null;
+                })}
+              </select>
+            </Field>
+            <Field label="Folder / Topic">
+              <select className="a-input" dir="auto" value={meta.topicId || ""} onChange={(e) => updateMeta({ topicId: e.target.value })} disabled={topicsRes.loading && !topicsRes.data}>
+                <option value="">— Koi topic nahi (seedha category mein) —</option>
+                {topicOptions.map((t) => <option key={t.id} value={t.id}>{folderLabel(t)}{t.status !== "active" ? " (hidden)" : ""}</option>)}
+                {meta.topicId && !topicOptions.some((t) => t.id === meta.topicId) && <option value={meta.topicId}>(current topic)</option>}
+              </select>
+              <button type="button" className="a-btn mt-2 !py-1" onClick={() => setAddFolder(true)} disabled={!cats.data?.length}><Icon name="plus" size={14} />Add Folder</button>
+              {topicsRes.error ? <span className="mt-1 block text-xs text-ad-danger">Topics load nahi hue. Page refresh karke dekhein.</span>
+                : topicsRes.data && topicOptions.length === 0 ? null
+                : <span className="mt-1 block text-xs text-ad-mute">Article publish hone par is topic ke andar dikhega.</span>}
+            </Field>
+          </div>
+
+          <VersionsPanel baseLang={lang} title={title} titleTr={extra.titleTr} setTitleTr={setTitleTr} blocks={blocks} setBlocks={setBlocksSaved} toast={toast} />
+
+          <div className="a-card space-y-3 p-4">
+            <h3 className="text-sm font-semibold">Link &amp; SEO</h3>
+            <Field label="Slug (link naam)" hint={live ? "Live post ka link badalna purane links tod sakta hai. Ye bhi 'Publish changes' ke baad hi live hoga." : "Khali chhodein to heading se ban jayega. Sirf a-z, 0-9 aur '-'."}>
+              <input className="a-input" dir="ltr" value={meta.slug || ""} maxLength={120} placeholder="post-ka-link-naam" onChange={(e) => typeSlug(e.target.value)} onBlur={onSeoBlur} />
+            </Field>
+            <Field label="Excerpt (chhota saaransh)" hint={`${(extra.excerpt || "").length}/1000`}>
+              <textarea className="a-input min-h-[5rem]" dir="auto" value={extra.excerpt || ""} maxLength={1000} onChange={(e) => typeExtra({ excerpt: e.target.value })} onBlur={onSeoBlur} />
+            </Field>
+            <Field label="SEO title" hint={`${(extra.seoTitle || "").length}/200 · khali ho to post ka heading use hoga`}>
+              <input className="a-input" dir="auto" value={extra.seoTitle || ""} maxLength={200} onChange={(e) => typeExtra({ seoTitle: e.target.value })} onBlur={onSeoBlur} />
+            </Field>
+            <Field label="SEO description" hint={`${(extra.seoDescription || "").length}/400`}>
+              <textarea className="a-input min-h-[5rem]" dir="auto" value={extra.seoDescription || ""} maxLength={400} onChange={(e) => typeExtra({ seoDescription: e.target.value })} onBlur={onSeoBlur} />
+            </Field>
+          </div>
+
+          <div className="a-card space-y-3 p-4">
+            <h3 className="text-sm font-semibold">Cover image</h3>
+            <MediaUploader value={extra.coverKey} onChange={(coverKey) => updateExtra({ coverKey })} label="Upload cover" />
+          </div>
+        </div>
+      </section>
+
+      {dialog}
+      {addFolder && (
+        <Modal wide title="New folder" onClose={() => setAddFolder(false)}>
+          <FolderForm
+            categories={cats.data || []}
+            defaultCategoryId={meta.categoryId}
+            onCancel={() => setAddFolder(false)}
+            onDone={(created) => {
+              setAddFolder(false);
+              topicsRes.reload();
+              if (created.categoryId === meta.categoryId) updateMeta({ topicId: created.id });
+              else toast("Folder bana diya, par ye dusri category ka hai — post ki category nahi badli.");
+            }}
+          />
+        </Modal>
+      )}
+    </PublicLayout>
+  );
+}

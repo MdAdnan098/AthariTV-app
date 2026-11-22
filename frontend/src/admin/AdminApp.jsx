@@ -1,0 +1,64 @@
+import { Navigate, Outlet, Route, Routes, useLocation, useParams } from "react-router-dom";
+import { AuthProvider, useAuth } from "../context/AuthContext.jsx";
+import { ToastProvider } from "./components/ui.jsx";
+import { AdminLayout } from "./AdminLayout.jsx";
+import Login from "./pages/Login.jsx";
+import AdminAccess from "./pages/AdminAccess.jsx";
+import Dashboard from "./pages/Dashboard.jsx";
+import Articles from "./pages/Articles.jsx";
+import ArticleEditor from "./pages/ArticleEditor.jsx";
+import ArticleComposer from "./pages/ArticleComposer.jsx";
+import Categories from "./pages/Categories.jsx";
+import Topics from "./pages/Topics.jsx";
+import Preview from "./pages/Preview.jsx";
+import LiveSessions from "./pages/LiveSessions.jsx";
+import Courses from "./pages/Courses.jsx";
+import Enrollments from "./pages/Enrollments.jsx";
+import Payments from "./pages/Payments.jsx";
+
+// Old "Page view" address -> the article now opens in the page view by default.
+function WriteRedirect() {
+  const { id } = useParams();
+  return <Navigate to={`/admin/articles/${id}`} replace />;
+}
+
+function Protected() {
+  const { status } = useAuth();
+  const loc = useLocation();
+  if (status === "loading") return <div className="p-10 text-center text-sm text-mute">Checking session…</div>;
+  if (status === "anon") return <Navigate to="/admin/login" replace state={{ from: loc.pathname }} />;
+  return <Outlet />;
+}
+
+export default function AdminApp() {
+  return (
+    <AuthProvider>
+      <ToastProvider>
+        <Routes>
+          <Route path="login" element={<Login />} />
+          <Route path="register" element={<AdminAccess mode="register" />} />
+          <Route path="forgot-password" element={<AdminAccess mode="reset" />} />
+          <Route element={<Protected />}>
+            <Route element={<AdminLayout />}>
+              <Route index element={<Dashboard />} />
+              <Route path="articles" element={<Articles />} />
+              <Route path="articles/:id/form" element={<ArticleEditor />} />
+              <Route path="categories" element={<Categories />} />
+              <Route path="topics" element={<Topics />} />
+              <Route path="live-sessions" element={<LiveSessions />} />
+              <Route path="courses" element={<Courses />} />
+              <Route path="enrollments" element={<Enrollments />} />
+              <Route path="payments" element={<Payments />} />
+            </Route>
+            <Route path="preview/:id" element={<Preview />} />
+            {/* "New article" and every existing article: the post as a live page (outside the admin sidebar layout) */}
+            <Route path="articles/new" element={<ArticleComposer />} />
+            <Route path="articles/:id" element={<ArticleComposer />} />
+            <Route path="articles/:id/write" element={<WriteRedirect />} />
+          </Route>
+          <Route path="*" element={<Navigate to="/admin" replace />} />
+        </Routes>
+      </ToastProvider>
+    </AuthProvider>
+  );
+}

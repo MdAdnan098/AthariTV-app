@@ -1,0 +1,80 @@
+import { request, qs } from "../lib/api.js";
+
+const json = (method, body) => ({ method, body });
+
+function crud(base, listKey, itemKey) {
+  return {
+    list: (params, signal) => request(`${base}${qs(params)}`, { signal }).then((d) => d[listKey]),
+    get: (id, signal) => request(`${base}/${id}`, { signal }).then((d) => d[itemKey]),
+    create: (body) => request(base, json("POST", body)).then((d) => d[itemKey]),
+    update: (id, body) => request(`${base}/${id}`, json("PATCH", body)).then((d) => d[itemKey]),
+  };
+}
+
+export const adminApi = {
+  login: (username, password) => request("/api/admin/login", json("POST", { username, password })).then((d) => d.admin),
+  register: (username, password, secretKey) => request("/api/admin/register", json("POST", { username, password, secretKey })),
+  resetPassword: (username, secretKey, newPassword) => request("/api/admin/reset-password", json("POST", { username, secretKey, newPassword })),
+  logout: () => request("/api/admin/logout", json("POST", {})),
+  me: (signal) => request("/api/admin/me", { signal }).then((d) => d.admin),
+
+  categories: {
+    ...crud("/api/admin/categories", "categories", "category"),
+    archive: (id) => request(`/api/admin/categories/${id}/archive`, json("POST", {})).then((d) => d.category),
+    reorder: (items) => request("/api/admin/categories/reorder", json("POST", { items })),
+  },
+  topics: {
+    ...crud("/api/admin/topics", "topics", "topic"),
+    impact: (id, signal) => request(`/api/admin/topics/${id}/impact`, { signal }).then((d) => d.impact),
+    remove: (id) => request(`/api/admin/topics/${id}`, { method: "DELETE" }),
+    reorder: (categoryId, items) => request("/api/admin/topics/reorder", json("POST", { categoryId, items })),
+  },
+  articles: {
+    ...crud("/api/admin/articles", "articles", "article"),
+    listPage: (params, signal) => request(`/api/admin/articles${qs(params)}`, { signal }), // { articles, page, limit, total, pages }
+    listWithCounts: (params, signal) => request(`/api/admin/articles${qs({ ...params, counts: 1 })}`, { signal }), // { articles, counts: { total, published, draft, archived } }
+    remove: (id) => request(`/api/admin/articles/${id}`, { method: "DELETE" }),
+    removeAll: () => request("/api/admin/articles", { method: "DELETE" }),
+    highlights: (id, body) => request(`/api/admin/articles/${id}/highlights`, json("PATCH", body)).then((d) => d.article),
+    saveDraft: (id, body) => request(`/api/admin/articles/${id}/draft`, json("PUT", body)), // auto-save: { blocks, references, baseRev } -> { article, references }
+    discardDraft: (id) => request(`/api/admin/articles/${id}/draft`, { method: "DELETE" }), // -> { article, references }
+    action: (id, name) => request(`/api/admin/articles/${id}/${name}`, json("POST", {})).then((d) => d.article), // publish | unpublish | archive
+  },
+  references: {
+    ...crud("/api/admin/references", "references", "reference"),
+    remove: (id) => request(`/api/admin/references/${id}`, { method: "DELETE" }),
+  },
+
+  liveSessions: {
+    ...crud("/api/admin/live-sessions", "sessions", "session"),
+    listWithMeta: (params, signal) => request(`/api/admin/live-sessions${qs(params)}`, { signal }), // { sessions, youtubeSync }
+    remove: (id) => request(`/api/admin/live-sessions/${id}`, { method: "DELETE" }),
+    sync: () => request("/api/admin/live-sessions/sync", json("POST", {})).then((d) => d.sync),
+  },
+  courses: {
+    ...crud("/api/admin/courses", "courses", "course"),
+    remove: (id) => request(`/api/admin/courses/${id}`, { method: "DELETE" }),
+    archive: (id) => request(`/api/admin/courses/${id}/archive`, json("POST", {})).then((d) => d.course),
+    reorder: (items) => request("/api/admin/courses/reorder", json("POST", { items })),
+  },
+  enrollments: {
+    list: (params, signal) => request(`/api/admin/enrollments${qs(params)}`, { signal }).then((d) => d.enrollments),
+    get: (id, signal) => request(`/api/admin/enrollments/${id}`, { signal }).then((d) => d.enrollment),
+    update: (id, body) => request(`/api/admin/enrollments/${id}`, json("PATCH", body)).then((d) => d.enrollment),
+  },
+  dashboard: {
+    stats: (signal) => request("/api/admin/dashboard-stats", { signal }).then((d) => d.stats), // read-only counts: { enrollments, payments, liveSessions }
+  },
+  payments: {
+    list: (params, signal) => request(`/api/admin/payments${qs(params)}`, { signal }).then((d) => d.payments),
+  },
+
+  // Images are shrunk in the browser first (see lib/compressImage.js), then stored in R2.
+  async upload(file) {
+    const { compressImage } = await import("../lib/compressImage.js");
+    const small = await compressImage(file);
+    const form = new FormData();
+    form.append("file", small);
+    return request("/api/admin/media", { method: "POST", form });
+  },
+};

@@ -1,0 +1,9 @@
+{
+  "appId": "com.atharitv.app",
+  "appName": "AthariTV",
+  "webDir": "dist",
+  "server": {
+    "url": "https://atharitv-website.pages.dev",
+    "cleartext": false
+  }
+}
