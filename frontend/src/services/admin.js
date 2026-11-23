@@ -45,6 +45,12 @@ export const adminApi = {
     remove: (id) => request(`/api/admin/references/${id}`, { method: "DELETE" }),
   },
 
+  // Android APP release settings (not the website): GET -> { release, allowedHosts }, PUT saves / publishes / unpublishes.
+  appRelease: {
+    get: (signal) => request("/api/admin/app-release", { signal }),
+    save: (body) => request("/api/admin/app-release", json("PUT", body)).then((d) => d.release),
+  },
+
   liveSessions: {
     ...crud("/api/admin/live-sessions", "sessions", "session"),
     listWithMeta: (params, signal) => request(`/api/admin/live-sessions${qs(params)}`, { signal }), // { sessions, youtubeSync }

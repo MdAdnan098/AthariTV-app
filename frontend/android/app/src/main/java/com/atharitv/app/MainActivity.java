@@ -40,6 +40,9 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        // Local plugin for the Android update check (app version + opening the official download link).
+        // Plugins must be registered BEFORE super.onCreate().
+        registerPlugin(AthariAppPlugin.class);
         super.onCreate(savedInstanceState);
 
         // Make sure Android Autofill (Google Password Manager etc.) is allowed to see the WebView's login fields.

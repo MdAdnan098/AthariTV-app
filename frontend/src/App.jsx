@@ -4,6 +4,7 @@ import { ThemeProvider } from "./context/ThemeContext.jsx";
 import { FontSizeProvider } from "./context/FontSizeContext.jsx";
 import { AppRouter } from "./app/router.jsx";
 import { ErrorBoundary } from "./components/ui/ErrorBoundary.jsx";
+import AppUpdateLoader from "./components/app/AppUpdateLoader.jsx";
 
 export default function App() {
   return (
@@ -12,6 +13,7 @@ export default function App() {
         <FontSizeProvider>
           <BrowserRouter>
             <ErrorBoundary><AppRouter /></ErrorBoundary>
+            <AppUpdateLoader />
           </BrowserRouter>
         </FontSizeProvider>
       </I18nProvider>

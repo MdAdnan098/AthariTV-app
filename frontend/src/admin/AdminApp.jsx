@@ -15,6 +15,7 @@ import LiveSessions from "./pages/LiveSessions.jsx";
 import Courses from "./pages/Courses.jsx";
 import Enrollments from "./pages/Enrollments.jsx";
 import Payments from "./pages/Payments.jsx";
+import AppRelease from "./pages/AppRelease.jsx";
 
 // Old "Page view" address -> the article now opens in the page view by default.
 function WriteRedirect() {
@@ -49,6 +50,7 @@ export default function AdminApp() {
               <Route path="courses" element={<Courses />} />
               <Route path="enrollments" element={<Enrollments />} />
               <Route path="payments" element={<Payments />} />
+              <Route path="app-update" element={<AppRelease />} />
             </Route>
             <Route path="preview/:id" element={<Preview />} />
             {/* "New article" and every existing article: the post as a live page (outside the admin sidebar layout) */}

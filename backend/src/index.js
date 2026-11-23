@@ -19,6 +19,8 @@ import { routes as adminCourseRoutes } from "./routes/admin.courses.routes.js";
 import { routes as publicPaymentRoutes } from "./routes/public.payments.routes.js";
 import { routes as adminEnrollmentRoutes } from "./routes/admin.enrollments.routes.js";
 import { routes as adminDashboardRoutes } from "./routes/admin.dashboard.routes.js";
+import { routes as publicAppReleaseRoutes } from "./routes/public.appRelease.routes.js";
+import { routes as adminAppReleaseRoutes } from "./routes/admin.appRelease.routes.js";
 import { runScheduledSync } from "./services/youtube/youtube.service.js";
 import { archiveExpiredCourses } from "./services/db/course.service.js";
 import { loadConfig, resolveAllowedOrigin } from "./config/env.js";
@@ -56,6 +58,8 @@ const routeDefs = [
   ...publicPaymentRoutes,
   ...adminEnrollmentRoutes,
   ...adminDashboardRoutes,
+  ...publicAppReleaseRoutes,
+  ...adminAppReleaseRoutes,
 ];
 
 const router = buildRouter(routeDefs);

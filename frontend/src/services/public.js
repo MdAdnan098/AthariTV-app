@@ -35,6 +35,8 @@ export const publicApi = {
   article: (slug, signal) => request(`/api/public/articles/${encodeURIComponent(slug)}`, { signal }),
 
   liveSessions: (params, signal) => request(`/api/public/live-sessions${qs(params)}`, { signal, cache: listCache() }).then((d) => d.sessions),
+  /** Android APP release info (not a website version): the newest published release, or null. Never cached. */
+  appUpdate: (signal) => request("/api/public/app-update", { signal, cache: "no-store" }).then((d) => d.release),
   courses: (signal) => request("/api/public/courses", { signal }).then((d) => d.courses),
   course: (slug, signal) => request(`/api/public/courses/${encodeURIComponent(slug)}`, { signal }).then((d) => d.course),
 

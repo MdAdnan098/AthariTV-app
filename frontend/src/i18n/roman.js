@@ -44,5 +44,14 @@ export default {
   },
   viewer: { zoomIn: "Bada karein", zoomOut: "Chhota karein", reset: "Reset", prev: "Pichla", next: "Agla", close: "Band karein", pageOf: "Page {n} / {total}" },
   common: { loading: "Load ho raha hai…", error: "Kuch ghalat ho gaya.", retry: "Dobara koshish karein", empty: "Kuch nahi mila.", home: "Home par jayein", notFound: "Safha nahi mila" },
+  appUpdate: {
+    titleOptional: "Naya update maujood hai", titleMandatory: "Update zaroori hai",
+    newVersion: "Naya version", yourVersion: "Aapka version", releaseDate: "Release date", whatsNew: "Naya kya hai",
+    mandatoryText: "AthariTV ka yeh version ab support nahi hota. Jaari rakhne ke liye naya version install karna zaroori hai.",
+    optionalText: "AthariTV ka naya version tayyar hai.",
+    updateNow: "Abhi update karein", later: "Baad mein", recheck: "Dobara check karein",
+    installHint: "Download hone ke baad Android aap se install ki ijazat maangega. Install ke baad app dobara kholein.",
+    openFailed: "Update ka link nahi khul saka. Dobara koshish karein.",
+  },
   footer: { about: "Quran, Sunnat aur salaf ke fahm par mabni tahqiqi library.", links: "Links", info: "Information", contact: "Hum se rabta karein", follow: "Follow us on", rights: "All Rights Reserved" },
 };

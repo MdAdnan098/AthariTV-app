@@ -15,6 +15,7 @@ const NAV = [
   ["/admin/courses", "Courses", "cap"],
   ["/admin/enrollments", "Enrollments", "check"],
   ["/admin/payments", "Payments", "file"],
+  ["/admin/app-update", "App Updates", "download"],
 ];
 
 export function AdminShell({ children }) {
