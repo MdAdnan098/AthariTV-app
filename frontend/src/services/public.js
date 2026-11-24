@@ -37,6 +37,11 @@ export const publicApi = {
   liveSessions: (params, signal) => request(`/api/public/live-sessions${qs(params)}`, { signal, cache: listCache() }).then((d) => d.sessions),
   /** Android APP release info (not a website version): the newest published release, or null. Never cached. */
   appUpdate: (signal) => request("/api/public/app-update", { signal, cache: "no-store" }).then((d) => d.release),
+  // Push notifications (Phase 3). The device token is sent only to register / change / remove ITS OWN record.
+  pushStatus: (signal) => request("/api/public/push/status", { signal, cache: "no-store" }).then((d) => !!d.enabled),
+  pushRegister: (body) => request("/api/public/push/register", { method: "POST", body }),
+  pushPreferences: (body) => request("/api/public/push/preferences", { method: "PUT", body }),
+  pushUnregister: (body) => request("/api/public/push/unregister", { method: "POST", body }),
   courses: (signal) => request("/api/public/courses", { signal }).then((d) => d.courses),
   course: (slug, signal) => request(`/api/public/courses/${encodeURIComponent(slug)}`, { signal }).then((d) => d.course),
 

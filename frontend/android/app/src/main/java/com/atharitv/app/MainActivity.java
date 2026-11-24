@@ -1,5 +1,8 @@
 package com.atharitv.app;
 
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.content.Context;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -45,6 +48,12 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(AthariAppPlugin.class);
         super.onCreate(savedInstanceState);
 
+        // Push notifications (Phase 3): the channel Android needs for notifications (API 26+), and the page a tapped
+        // notification wants to open (launch intent now, and every later intent while the app is running).
+        createNotificationChannel();
+        AthariAppPlugin.captureNotificationLink(getIntent());
+        addOnNewIntentListener(intent -> AthariAppPlugin.captureNotificationLink(intent));
+
         // Make sure Android Autofill (Google Password Manager etc.) is allowed to see the WebView's login fields.
         // This is already the WebView default; setting it explicitly guards against it being turned off.
         WebView webView = getBridge() != null ? getBridge().getWebView() : null;
@@ -58,6 +67,16 @@ public class MainActivity extends BridgeActivity {
                 handleBack();
             }
         });
+    }
+
+    /** Same id as the manifest's default channel and the channel id the server puts in every Android message. */
+    private void createNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
+        NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager == null) return;
+        NotificationChannel channel = new NotificationChannel("atharitv_default", "AthariTV", NotificationManager.IMPORTANCE_HIGH);
+        channel.setDescription("New posts, courses and live sessions");
+        manager.createNotificationChannel(channel); // creating an existing channel is a no-op
     }
 
     private void handleBack() {

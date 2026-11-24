@@ -60,6 +60,16 @@ export function loadConfig(env) {
     appUpdate: {
       allowedHosts: parseAllowedHosts(env.APP_UPDATE_ALLOWED_HOSTS),
     },
+    // Push notifications (Phase 3). All optional - without FIREBASE_SERVICE_ACCOUNT nothing is sent and the admin
+    // dashboard says so. The service account JSON is a SECRET (backend only, set with `wrangler secret put`).
+    push: {
+      serviceAccountJson: env.FIREBASE_SERVICE_ACCOUNT || null, // secret - never leaves the Worker
+      // Devices handled per request. Cloudflare's FREE plan allows 50 outgoing requests per Worker invocation, so the
+      // default (40) is safe there; on a paid plan raise it (e.g. 400). Bigger audiences are finished in further chunks.
+      batchSize: Math.min(Math.max(Math.floor(Number(env.PUSH_BATCH_SIZE)) || 40, 1), 400),
+      // The website's own origin: a notification link may be written as a full URL only on this origin.
+      siteOrigin: String(env.PUSH_SITE_ORIGIN || (env.ALLOWED_ORIGIN !== "*" ? env.ALLOWED_ORIGIN : "") || "").trim().replace(/\/$/, ""),
+    },
     // Razorpay. All optional — payment endpoints answer 503 until configured.
     razorpay: {
       keyId: env.RAZORPAY_KEY_ID || null, // publishable id, returned to the checkout widget

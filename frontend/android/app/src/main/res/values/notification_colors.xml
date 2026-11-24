@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Accent colour of the small notification icon (the website's button colour). -->
+    <color name="notification_accent">#800020</color>
+</resources>

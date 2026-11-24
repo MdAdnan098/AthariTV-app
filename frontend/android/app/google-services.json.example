@@ -1,0 +1,5 @@
+{
+  "_comment": "EXAMPLE ONLY - not a real file. Download your own google-services.json from the Firebase console (Project settings > Your apps > Android app com.atharitv.app) and save it as frontend/android/app/google-services.json. Do not edit this example.",
+  "project_info": { "project_number": "REPLACE_WITH_YOUR_SENDER_ID", "project_id": "REPLACE_WITH_YOUR_PROJECT_ID" },
+  "client": [ { "client_info": { "mobilesdk_app_id": "REPLACE", "android_client_info": { "package_name": "com.atharitv.app" } } } ]
+}

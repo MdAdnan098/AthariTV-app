@@ -15,6 +15,7 @@ import {
   toPublicLiveSession,
 } from "../services/db/liveSession.service.js";
 import { syncLiveSessions, isYouTubeConfigured } from "../services/youtube/youtube.service.js";
+import { notifyLiveChange } from "../services/push/events.js";
 
 function fail(message, status, code) {
   const err = new Error(message);
@@ -82,6 +83,8 @@ export async function adminCreate(request, env) {
   if (errors.length > 0) throwValidation(errors);
 
   const session = await createLiveSession(config, body);
+  // Push notification (Phase 3): published + upcoming -> "new live session"; published + live now -> "live started".
+  await notifyLiveChange(config, null, session);
   return jsonSuccess({ session: toSafeLiveSession(session) }, { status: 201, allowedOrigin: config.allowedOrigin });
 }
 
@@ -95,7 +98,10 @@ export async function adminUpdate(request, env, ctx, params) {
   const errors = validateLiveSessionInput(body, { partial: true });
   if (errors.length > 0) throwValidation(errors);
 
+  const before = await findLiveSessionById(config, params.id);
   const session = await updateLiveSession(config, params.id, body);
+  // Push notification (Phase 3): see notifyLiveChange - only publishing / going live is an event, other edits are not.
+  await notifyLiveChange(config, before, session);
   return jsonSuccess({ session: toSafeLiveSession(session) }, { allowedOrigin: config.allowedOrigin });
 }
 
