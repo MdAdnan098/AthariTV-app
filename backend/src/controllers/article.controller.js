@@ -176,7 +176,7 @@ export async function publish(request, env, ctx, params) {
   // Push notification (Phase 3): only when the post goes from not-published to published - saving edits of a post that is
   // already live is not an event. Sent after the database write succeeded; it can never fail the publish. A body of
   // { "notify": false } skips it (e.g. when an old post is published again quietly).
-  if (!wasPublished) {
+  if (!wasPublished && !existing.publishedAt) {
     const body = await safeParseJson(request);
     if (!(body && body.notify === false)) await notifyArticlePublished(config, article);
   }
